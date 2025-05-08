@@ -51,6 +51,8 @@ class Primitives<
   uint64_t step;
   // Yang: is current ReduceCopy for network transfer?
   bool is_net_transfer;
+  // Yang: dedup scattered memcpy
+  uint64_t last_copied_step;
   struct ncclConnInfo* conn = NULL;
   struct ncclConnFifo* connFifo = NULL;
   T* connEltsFifo;
@@ -232,6 +234,9 @@ class Primitives<
     }
   }
 
+  // Yang: need to keep the same as comm.h
+  const int kIovStart = 328;
+
   template <int DirectRecv, int DirectSend, int Recv, int Send, int Src, int Dst>
   __device__ __forceinline__ void waitPeer(intptr_t srcIx, intptr_t dstIx, int offset, int nelts) {
     // Yang: initing shared variable. For tree allreduce, the first two threads will have (flags & (Recv*RoleWaitRecv)).
@@ -257,9 +262,6 @@ class Primitives<
       // Yang: load the is_net_transfer flag that is set by net.cc, non-zero means network transfer.
       is_net_transfer = loadStepValue(connStepPtr + 1);
     }
-
-    // Yang: need to keep the same as comm.h
-    const int kIovStart = 328;
 
     if (flags & (Recv*RoleWaitRecv | Send*RoleWaitSend)) {
       if (flags & ConnFifoEnabled)
@@ -334,26 +336,26 @@ class Primitives<
           uint64_t* tail_ptr = ncclShmem.groups[group].tail_ptr[t];
 
           int iov_idx = (step - StepPerSlice) % NCCL_STEPS;
-          struct iov *cur_iov = (struct iov *)((char *)tail_ptr + kIovStart + iov_idx * kIovSize);
+          struct iov *cur_iov_hbm = (struct iov *)((char *)tail_ptr + kIovStart + iov_idx * kIovSize);
           struct iov *cur_iov_shmem = ncclShmem.groups[group].cur_iovs + t;
 
           // Yang: single thread load iov to sharemem.
-          if (tid < cur_iov->iov_n) {
+          if (tid < cur_iov_shmem->iov_n) {
             int i = tid;
-            cur_iov_shmem->src_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov->src_addrs + i));
-            cur_iov_shmem->dst_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov->dst_addrs + i));
-            cur_iov_shmem->iov_lens[i] = loadInt(cur_iov->iov_lens + i);
+            cur_iov_shmem->src_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov_hbm->src_addrs + i));
+            cur_iov_shmem->dst_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov_hbm->dst_addrs + i));
+            cur_iov_shmem->iov_lens[i] = loadInt(cur_iov_hbm->iov_lens + i);
           }
           barrier();
 
-          kernelScatteredMemcpy(cur_iov);
+          kernelScatteredMemcpy(cur_iov_shmem);
 
           // Yang: debuging
           // if (tid == 0) {
-          //   int step_recv = cur_iov->step;
+          //   int step_recv = cur_iov_hbm->step;
           //   uint64_t gpu_idx = loadStepValue(tail_ptr + 1);
           //   uint64_t cpu_tail = loadStepValue(tail_ptr);
-          //   printf("[waitPeer2 %ld]: step %ld cpu_tail %ld step_recv %d iov_n %d src[0] %p dst[0] %p len %d\n", gpu_idx, step, cpu_tail, step_recv, cur_iov->iov_n, cur_iov->src_addrs[0], cur_iov->dst_addrs[0], cur_iov->iov_lens[0]);
+          //   printf("[waitPeer2 %ld]: step %ld cpu_tail %ld step_recv %d iov_n %d src[0] %p dst[0] %p len %d\n", gpu_idx, step, cpu_tail, step_recv, cur_iov_hbm->iov_n, cur_iov_hbm->src_addrs[0], cur_iov_hbm->dst_addrs[0], cur_iov_hbm->iov_lens[0]);
           // }
         }
       }
@@ -686,6 +688,8 @@ private:
     }
     step = conn->step;
     step = roundUp(step, SlicePerChunk*StepPerSlice);
+    // Yang: no step has been copied for this round.
+    last_copied_step = (uint64_t)-1;
     if (flags & RolePostRecv) {
       connStepPtr = conn->head;
       *connStepPtr = step; // Return credits in case we rounded up.
@@ -1107,6 +1111,11 @@ private:
   }
 
   __device__ __forceinline__ void patReduce(int recvPow2, int sendPow2, intptr_t inpIx, intptr_t outIx, int recvOffset, int sendOffset, int sendStepOffset, int nelem, int postRecv, int postSend) {
+    // Yang
+    if (tid < MAX_TIDS) {
+      ncclShmem.groups[group].is_net_transfer[tid] = false;
+    }
+
     nelem = nelem < 0 ? 0 : nelem;
     T* userInput = (T*)ncclShmem.groups[group].userInput;
     T* userOutput = (T*)ncclShmem.groups[group].userOutput;
@@ -1118,6 +1127,33 @@ private:
         connStepCache = loadStepValue(connStepPtr);
         if (checkAbort(spins)) break;
       }
+      
+      // Yang
+      if (last_copied_step != step) {
+        if (tid < MAX_TIDS) {
+          is_net_transfer = loadStepValue(connStepPtr + 1);
+          // Yang: is this step for network transfer?
+          ncclShmem.groups[group].is_net_transfer[tid] = is_net_transfer;
+          // Yang: using one thread to load the step into sharemem.
+          ncclShmem.groups[group].step[tid] = step;
+          // Yang: setup tail_ptr based on peer
+          ncclShmem.groups[group].tail_ptr[tid] = connStepPtr;
+          
+          if (is_net_transfer) {
+            // Yang: dedup to avoid double scattered memcpy.
+            last_copied_step = step ;
+
+            int iov_idx = step % NCCL_STEPS;
+            struct iov *cur_iov = (struct iov *)((char *)connStepPtr + kIovStart + iov_idx * kIovSize);
+            
+            // Yang: single thread load iov to sharemem.
+            ncclShmem.groups[group].iov_ns[tid] = loadInt(&cur_iov->iov_n);
+          }
+        } else {
+          printf("WARNING padReduce: tid %d exceeding MAX_TIDS (%d); considering increasing MAX_TIPS\n", tid, MAX_TIDS);
+        }
+      }
+
       if (postRecv) step += StepPerSlice;
     }
     if (sendPow2 >= 0 && sendPow2 == index && (flags & RoleWaitSend)) {
@@ -1157,6 +1193,38 @@ private:
 
     int workSize = ncclShmem.aborted ? 0 : nelem;
 
+    // Yang
+    for (int t = 0; t < MAX_TIDS; t++) {
+      if (ncclShmem.groups[group].is_net_transfer[t]) {
+        uint64_t step = ncclShmem.groups[group].step[t];
+        uint64_t* tail_ptr = ncclShmem.groups[group].tail_ptr[t];
+
+        int iov_idx = step % NCCL_STEPS;
+        struct iov *cur_iov_hbm = (struct iov *)((char *)tail_ptr + kIovStart + iov_idx * kIovSize);
+        struct iov *cur_iov_shmem = ncclShmem.groups[group].cur_iovs + 0;
+        
+        cur_iov_shmem->iov_n = ncclShmem.groups[group].iov_ns[t];
+        if (tid < cur_iov_shmem->iov_n) {
+          int i = tid;
+          cur_iov_shmem->src_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov_hbm->src_addrs + i));
+          cur_iov_shmem->dst_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov_hbm->dst_addrs + i));
+          cur_iov_shmem->iov_lens[i] = loadInt(cur_iov_hbm->iov_lens + i);
+        }
+        barrier();
+
+        kernelScatteredMemcpy(cur_iov_shmem);
+
+        // Yang: debuging
+        // if (tid == 0) {
+        //   int step_recv = cur_iov_shmem->step;
+        //   uint64_t gpu_idx = loadStepValue(tail_ptr + 1);
+        //   uint64_t cpu_tail = loadStepValue(tail_ptr);
+        //   printf("[padReduce %ld]: step %ld connStepPtr %p cpu_tail %ld step_recv %d iov_n %d src[0] %p dst[0] %p len %d t %d recvPow2 %d sendPow2 %d index %d srcs[0] %p dsts[0] %p nDsts %d workSize %d postRecv %d\n", gpu_idx, step, tail_ptr, cpu_tail, step_recv, cur_iov_shmem->iov_n, cur_iov_shmem->src_addrs[0], cur_iov_shmem->dst_addrs[0], cur_iov_shmem->iov_lens[0], t, recvPow2, sendPow2, index, ncclShmem.groups[group].srcs[0], ncclShmem.groups[group].dsts[0], nDsts, workSize, postRecv);
+        // }
+      }
+    }
+    barrier();
+
     reduceCopy<Unroll, RedOp, T, 0, 1, 2, 0, 1, 1, /*PreOpSrcs*/0>
       (tid, nthreads, ncclShmem.redOpArgs[0],  nullptr, /*postOp=*/false,
        nSrcs, srcs, 1, ncclShmem.groups[group].dsts, workSize);
@@ -1167,6 +1235,11 @@ private:
   }
 
   __device__ __forceinline__ void patCopy(int recvPow2, int sendPow2, intptr_t inpIx, intptr_t outIx, int recvOffset, int sendOffset, int recvStepOffset, int nelem, int postRecv, int postSend) {
+    // Yang
+    if (tid < MAX_TIDS) {
+      ncclShmem.groups[group].is_net_transfer[tid] = false;
+    }
+
     nelem = nelem < 0 ? 0 : nelem;
     T* userInput = (T*)ncclShmem.groups[group].userInput;
     T* userOutput = (T*)ncclShmem.groups[group].userOutput;
@@ -1185,6 +1258,33 @@ private:
       } else {
         ncclShmem.groups[group].dsts[1] = ncclShmem.groups[group].srcs[0]; // Already done
       }
+
+      // Yang
+      if (last_copied_step != step + recvStepOffset) {
+        if (tid < MAX_TIDS) {
+          is_net_transfer = loadStepValue(connStepPtr + 1);
+          // Yang: is this step for network transfer?
+          ncclShmem.groups[group].is_net_transfer[tid] = is_net_transfer;
+          // Yang: using one thread to load the step into sharemem.
+          ncclShmem.groups[group].step[tid] = step + recvStepOffset;
+          // Yang: setup tail_ptr based on peer
+          ncclShmem.groups[group].tail_ptr[tid] = connStepPtr;
+          
+          if (is_net_transfer) {
+            // Yang: dedup to avoid double scattered memcpy.
+            last_copied_step = step + recvStepOffset;
+
+            int iov_idx = (step + recvStepOffset) % NCCL_STEPS;
+            struct iov *cur_iov = (struct iov *)((char *)connStepPtr + kIovStart + iov_idx * kIovSize);
+            
+            // Yang: single thread load iov to sharemem.
+            ncclShmem.groups[group].iov_ns[tid] = loadInt(&cur_iov->iov_n);
+          }
+        } else {
+          printf("WARNING padCopy: tid %d exceeding MAX_TIDS (%d); considering increasing MAX_TIPS\n", tid, MAX_TIDS);
+        }
+      }
+
       if (postRecv) step += StepPerSlice;
     }
     if (sendPow2 >= 0 && sendPow2 == index && (flags & RoleWaitSend)) {
@@ -1218,6 +1318,38 @@ private:
 
     int workSize = ncclShmem.aborted ? 0 : nelem;
 
+    // Yang
+    for (int t = 0; t < MAX_TIDS; t++) {
+      if (ncclShmem.groups[group].is_net_transfer[t]) {
+        uint64_t step = ncclShmem.groups[group].step[t];
+        uint64_t* tail_ptr = ncclShmem.groups[group].tail_ptr[t];
+
+        int iov_idx = step % NCCL_STEPS;
+        struct iov *cur_iov_hbm = (struct iov *)((char *)tail_ptr + kIovStart + iov_idx * kIovSize);
+        struct iov *cur_iov_shmem = ncclShmem.groups[group].cur_iovs + 0;
+        
+        cur_iov_shmem->iov_n = ncclShmem.groups[group].iov_ns[t];
+        if (tid < cur_iov_shmem->iov_n) {
+          int i = tid;
+          cur_iov_shmem->src_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov_hbm->src_addrs + i));
+          cur_iov_shmem->dst_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov_hbm->dst_addrs + i));
+          cur_iov_shmem->iov_lens[i] = loadInt(cur_iov_hbm->iov_lens + i);
+        }
+        barrier();
+
+        kernelScatteredMemcpy(cur_iov_shmem);
+
+        // Yang: debuging
+        // if (tid == 0) {
+        //   int step_recv = cur_iov_shmem->step;
+        //   uint64_t gpu_idx = loadStepValue(tail_ptr + 1);
+        //   uint64_t cpu_tail = loadStepValue(tail_ptr);
+        //   printf("[padCopy %ld]: step %ld connStepPtr %p cpu_tail %ld step_recv %d iov_n %d src[0] %p dst[0] %p len %d t %d recvPow2 %d sendPow2 %d index %d srcs[0] %p dsts[0] %p nDsts %d workSize %d postRecv %d\n", gpu_idx, step, tail_ptr, cpu_tail, step_recv, cur_iov_shmem->iov_n, cur_iov_shmem->src_addrs[0], cur_iov_shmem->dst_addrs[0], cur_iov_shmem->iov_lens[0], t, recvPow2, sendPow2, index, ncclShmem.groups[group].srcs[0], ncclShmem.groups[group].dsts[0], nDsts, workSize, postRecv);
+        // }
+      }
+    }
+    barrier();
+    
     reduceCopy<Unroll, RedOp, T, 0, 1, 1, 0, 1, 2, /*PreOpSrcs*/0>
       (tid, nthreads, ncclShmem.redOpArgs[0],  nullptr, /*postOp=*/false,
        1, ncclShmem.groups[group].srcs, nDsts, dsts, workSize);

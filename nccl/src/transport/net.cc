@@ -1462,13 +1462,14 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
                 volatile struct iov* cur_iov = (volatile struct iov*)(recv_mem->iovFifo + iov_idx);                  
 
                 cur_iov->iov_n = *iov_n;
-                // cur_iov->gpu_idx = proxyState->cudaDev; // for debugging
-                // cur_iov->step = cur_recvTail; // for debugging
                 for (int j=0; j < cur_iov->iov_n; j++) {
                   cur_iov->src_addrs[j] = iov_addrs[j];
                   cur_iov->dst_addrs[j] = (void*)((char*)(uccl_req_ptrs[0]) + dst_offsets[j]);
                   cur_iov->iov_lens[j] = iov_lens[j];
                 }
+                // Yang: for debugging
+                // cur_iov->gpu_idx = proxyState->cudaDev;
+                // cur_iov->step = cur_recvTail;
                 // printf("[gpu %d net]: cur_recvTail %ld next_recvTail %ld base %ld step %ld recvTail_ptr %p iov_n %d src %p dst %p len %d\n", proxyState->cudaDev, cur_recvTail, sub->base + sub->transmitted, sub->base, step, recvTail, *iov_n, cur_iov->src_addrs[0], cur_iov->dst_addrs[0], cur_iov->iov_lens[0]);
                
                 // This does not work, as recvTail could be < 0;

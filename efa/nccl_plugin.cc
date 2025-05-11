@@ -89,13 +89,12 @@ struct UcclSendComm {
 ncclResult_t pluginInit(ncclDebugLogger_t logFunction) {
     google::InitGoogleLogging("UCCL");
     google::InstallFailureSignalHandler();
-    // FLAGS_v = 4;
+    printf("UCCL pluginInit\n");
     ep = new Endpoint();
     return ncclSuccess;
 }
 
 ncclResult_t pluginDevices(int *ndev) {
-    // To ease NIC-GPU mapping on p4d, we virtualize each NIC into two.
     *ndev = 4;
     return ncclSuccess;
 }

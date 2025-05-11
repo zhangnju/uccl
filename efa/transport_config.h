@@ -31,7 +31,8 @@ static_assert(
         kReceiverCCType != ReceiverCCType::kNone,
     "kSenderCCType and kReceiverCCType can not be kNone at the same time.");
 
-#define P4D
+// #define P4D
+#define P5EN
 
 static const uint32_t kNumVdevices = 8;        // # of vEFA/GPUs.
 static const uint32_t kNumEnginesPerVdev = 2;  // # of engines per vEFA/GPU.
@@ -49,6 +50,50 @@ static const std::string ENA_DEVICE_NAME_LIST[] = {"ens32", "ens65", "ens130",
                                                    "ens163"};
 static constexpr double kLinkBandwidth = 100.0 * 1e9 / 8;  // 100Gbps
 #endif
+
+#ifdef P5EN
+static const uint8_t NUM_DEVICES = (kNumVdevices + 1) / 2;
+static const uint8_t EFA_GID_IDX = 0;
+static const std::string EFA_DEVICE_NAME_LIST[] = {
+    "rdmap85s0",
+    "rdmap86s0",
+    "rdmap87s0",
+    "rdmap88s0",
+    "rdmap110s0",
+    "rdmap111s0",
+    "rdmap112s0",
+    "rdmap113s0",
+    "rdmap135s0",
+    "rdmap136s0",
+    "rdmap137s0",
+    "rdmap138s0",
+    "rdmap160s0",
+    "rdmap161s0",
+    "rdmap162s0",
+    "rdmap163s0",
+    };
+static const std::string ENA_DEVICE_NAME_LIST[] = {
+    "enp71s0",
+    "enp72s0",
+    "enp73s0",
+    "enp74s0",
+    "enp96s0",
+    "enp97s0",
+    "enp98s0",
+    "enp99s0",
+    "enp122s0",
+    "enp123s0",
+    "enp124s0",
+    "enp125s0",
+    "enp146s0",
+    "enp147s0",
+    "enp148s0",
+    "enp149s0",
+    };
+static constexpr double kLinkBandwidth = 200.0 * 1e9 / 8;  // 200Gbps
+#endif
+
+
 static const uint8_t EFA_PORT_NUM = 1;  // The port of EFA device to use.
 static const uint32_t EFA_MTU = 9000;  // Max frame on fabric, includng headers.
 static const uint32_t EFA_MAX_PAYLOAD = 8928;  // this excludes EFA_UD_ADDITION.

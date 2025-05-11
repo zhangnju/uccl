@@ -317,7 +317,7 @@ class Primitives<
           struct iov *cur_iov = (struct iov *)((char *)connStepPtr + kIovStart + iov_idx * kIovSize);
           
           // Yang: single thread load iov to sharemem.
-          ncclShmem.groups[group].cur_iovs[tid].iov_n = loadInt(&cur_iov->iov_n);
+          ncclShmem.groups[group].iov_ns[tid] = loadInt(&cur_iov->iov_n);
         }
 
         // Yang: this gives the correct step value from CPU.
@@ -337,9 +337,10 @@ class Primitives<
 
           int iov_idx = (step - StepPerSlice) % NCCL_STEPS;
           struct iov *cur_iov_hbm = (struct iov *)((char *)tail_ptr + kIovStart + iov_idx * kIovSize);
-          struct iov *cur_iov_shmem = ncclShmem.groups[group].cur_iovs + t;
+          struct iov *cur_iov_shmem = &ncclShmem.groups[group].cur_iovs;
 
           // Yang: single thread load iov to sharemem.
+          cur_iov_shmem->iov_n = ncclShmem.groups[group].iov_ns[t];
           if (tid < cur_iov_shmem->iov_n) {
             int i = tid;
             cur_iov_shmem->src_addrs[i] = (void*)loadInt64((int64_t*)(cur_iov_hbm->src_addrs + i));
@@ -1201,7 +1202,7 @@ private:
 
         int iov_idx = step % NCCL_STEPS;
         struct iov *cur_iov_hbm = (struct iov *)((char *)tail_ptr + kIovStart + iov_idx * kIovSize);
-        struct iov *cur_iov_shmem = ncclShmem.groups[group].cur_iovs + 0;
+        struct iov *cur_iov_shmem = &ncclShmem.groups[group].cur_iovs;
         
         cur_iov_shmem->iov_n = ncclShmem.groups[group].iov_ns[t];
         if (tid < cur_iov_shmem->iov_n) {
@@ -1326,7 +1327,7 @@ private:
 
         int iov_idx = step % NCCL_STEPS;
         struct iov *cur_iov_hbm = (struct iov *)((char *)tail_ptr + kIovStart + iov_idx * kIovSize);
-        struct iov *cur_iov_shmem = ncclShmem.groups[group].cur_iovs + 0;
+        struct iov *cur_iov_shmem = &ncclShmem.groups[group].cur_iovs;
         
         cur_iov_shmem->iov_n = ncclShmem.groups[group].iov_ns[t];
         if (tid < cur_iov_shmem->iov_n) {

@@ -95,7 +95,7 @@ UCCL currently supports AWS ENA NICs; support for Azure and GCP NICs and RDMA is
     * Build `nccl` and `nccl-tests` under the `/opt/uccl_rdma` folder:
         ```
         cd nccl
-        make src.build -j NVCC_GENCODE="-gencode=arch=compute_80,code=sm_80"
+        make src.build -j NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90"
         cp src/include/nccl_common.h build/include/
         cd ..
 

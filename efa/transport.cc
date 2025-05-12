@@ -1873,7 +1873,7 @@ PollCtx *Endpoint::uccl_send_async(ConnID conn_id, const void *data,
                                    const int len, Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev = lb_for_vdev();
+    auto pdev = (conn_id.next_engine_send++) % kBundleNIC;
 
     LOG(INFO) << "uccl_send_async: pdev " << pdev << " engine_idx " << conn_id.engine_idx[pdev];
 
@@ -1904,7 +1904,7 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                                    Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev = lb_for_vdev();
+    auto pdev = (conn_id.next_engine_recv++) % kBundleNIC;
 
     poll_ctx->num_unfinished = 1;
     poll_ctx->engine_idx = conn_id.engine_idx[pdev];
@@ -1928,10 +1928,10 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
     return poll_ctx;
 }
 PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
-                                             Mhandle *mhandle, int *pdev) {
+                                             Mhandle *mhandle, uint32_t *pdev) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    *pdev = lb_for_vdev();
+    *pdev = (conn_id.next_engine_recv++) % kBundleNIC;
 
     LOG(INFO) << "uccl_recv_scattered_async: pdev " << *pdev << " engine_idx " << conn_id.engine_idx[*pdev];
 
@@ -1977,7 +1977,8 @@ PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
                                          int *len_p, Mhandle **mhandle, int n) {
     PollCtx *poll_ctx = ctx_pool_->pop();
     poll_ctx->num_unfinished = n;
-    poll_ctx->engine_idx = conn_id.engine_idx[lb_for_vdev()];
+    auto pdev = (conn_id.next_engine_recv++) % kBundleNIC;
+    poll_ctx->engine_idx = conn_id.engine_idx[pdev];
 #ifdef POLLCTX_DEBUG
     poll_ctx->flow_id = conn_id.flow_id;
     poll_ctx->req_id = req_id++;
@@ -2005,7 +2006,7 @@ PollCtx *Endpoint::uccl_flush_async(ConnID conn_id, void **data, int *len_p,
                                     Mhandle **mhandle, int n) {
     PollCtx *poll_ctx = ctx_pool_->pop();
     poll_ctx->num_unfinished = n;
-    poll_ctx->engine_idx = conn_id.engine_idx[lb_for_vdev()];
+    poll_ctx->engine_idx = conn_id.engine_idx[0];
 #ifdef POLLCTX_DEBUG
     poll_ctx->flow_id = conn_id.flow_id;
     poll_ctx->req_id = req_id++;

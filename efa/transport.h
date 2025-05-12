@@ -49,6 +49,8 @@ struct ConnID {
     // uint32_t engine_idx;  // Used for Endpoint to locate the right engine.
     uint32_t engine_idx[kBundleNIC];
     int boostrap_id;      // Used for bootstrap connection with the peer.
+    uint32_t next_engine_send;
+    uint32_t next_engine_recv;
 };
 
 struct Mhandle {
@@ -124,7 +126,7 @@ struct UcclRequest {
     int iov_lens[kMaxIovs];
     int dst_offsets[kMaxIovs];
     int iov_n;
-    int pdev;
+    uint32_t pdev;
     void *ptrs[32];
     /***********************/
 };
@@ -157,7 +159,7 @@ class Channel {
             UcclRequest *req;
         };
         Mhandle *mhandle;
-        int pdev;
+        uint32_t pdev;
         FlowID flow_id;
         // A list of FrameDesc bw deser_th and engine_th.
         FrameDesc *deser_msgs;
@@ -890,7 +892,7 @@ class Endpoint {
     PollCtx *uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                              Mhandle *mhandle);
     PollCtx *uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
-                                       Mhandle *mhandle, int *pdev);
+                                       Mhandle *mhandle, uint32_t *pdev);
     void uccl_recv_free_ptrs(ConnID conn_id, int iov_n, void **iov_addrs, int pdev);
     PollCtx *uccl_recv_multi_async(ConnID conn_id, void **data, int *len_p,
                                    Mhandle **mhandle, int n);
@@ -919,11 +921,6 @@ class Endpoint {
                                                        bool is_sender);
     inline int find_dedicated_engine_idx(int vdev_idx, bool is_sender);
     inline void fence_and_clean_ctx(PollCtx *ctx);
-
-    inline int lb_for_vdev() {
-        // return U32Rand(0, UINT32_MAX) % kBundleNIC;
-        return 0;
-    }
 
     std::mutex stats_mu_;
     std::condition_variable stats_cv_;

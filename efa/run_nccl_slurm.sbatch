@@ -20,6 +20,7 @@
 #SBATCH --time=00:10:00
 
 ROOT_DIR=/home/xzhiying/zhongjie_dev
+# ROOT_DIR=/home/xzhiying/uccl_rdma
 
 NVLINK_OFF=0
 PXN_DISABLE=0
@@ -64,6 +65,7 @@ export PATH=/opt/amazon/openmpi/bin:$PATH
 
 # run the test binary
 mpirun --bind-to none -np $SLURM_NNODES -N 1 \
+      -x NCCL_DEBUG=INFO \
       -x LD_LIBRARY_PATH=${LD_LIBRARY_PATH} \
       -x LD_PRELOAD="${LIBNCCL_PATH}" \
       -x NCCL_NET_PLUGIN="${PLUGIN_PATH}" \
@@ -82,6 +84,9 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x NCCL_GDRCOPY_SYNC_ENABLE=0 \
       -x NCCL_GDRCOPY_FIFO_ENABLE=0 \
       -x NCCL_PROTO=Simple \
+      -x NCCL_TOPO_FILE=/home/xzhiying/uccl_rdma/efa/p5en-48xl-topo.xml \
+      -x GLOG_logtostderr=0 \
+      -x UCCL_ENGINE_QUIET=1 \
       ${NCCL_TESTS_PATH} \
       -f 2 -b 1K -e 1G \
       -w 5 -n 10 \

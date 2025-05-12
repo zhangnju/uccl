@@ -111,10 +111,10 @@ static_assert(kNumEngines >= NUM_DEVICES * 2,
               "and one for receive to avoid deadlocks.");
 
 static uint32_t NUM_CPUS = std::thread::hardware_concurrency();
-// Using the middle 48 cores to avoid conflicting with nccl proxy service (that
-// uses the first 24 and last 24 cores as specified in p4d-24xl-topo.xml). The
-// two numbers are for numa 0 and 1 separately. GPU 0-3 + NIC 0-1 are on numa 0,
-// and GPU 4-7 + NIC 2-3 are on numa 1.
+// Using the middle 96 cores to avoid conflicting with nccl proxy service (that
+// uses the first 48 and last 48 cores as specified in p5en-48xl-topo.xml). The
+// two numbers are for numa 0 and 1 separately. GPU 0-3 + NIC 0-7 are on numa 0,
+// and GPU 4-7 + NIC 8-15 are on numa 1.
 
 // NUMA node0 CPU(s):      0-47,96-143
 // NUMA node1 CPU(s):      48-95,144-191

@@ -124,10 +124,10 @@ int main(int argc, char* argv[]) {
 
         for (int i = 0; i < kNumVdevices; i++) {
             auto gpu_idx = i;
-            auto dev_idx = get_dev_idx_by_gpu_idx(i);
+            auto pdev_idx = get_dev_idx_by_gpu_idx(i);
 
             cudaSetDevice(gpu_idx);
-            auto* dev = EFAFactory::GetEFADevice(dev_idx);
+            auto* dev = EFAFactory::GetEFADevice(pdev_idx);
 
             cudaMalloc(&data[i], kTestMsgSize);
             mh[i].mr[0] = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
@@ -426,10 +426,10 @@ int main(int argc, char* argv[]) {
 
         for (int i = 0; i < kNumVdevices; i++) {
             auto gpu_idx = i;
-            auto dev_idx = get_dev_idx_by_gpu_idx(i);
+            auto pdev_idx = get_dev_idx_by_gpu_idx(i);
 
             cudaSetDevice(gpu_idx);
-            auto* dev = EFAFactory::GetEFADevice(dev_idx);
+            auto* dev = EFAFactory::GetEFADevice(pdev_idx);
 
             cudaMalloc(&data[i], kTestMsgSize);
             mh[i].mr[0] = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,

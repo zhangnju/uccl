@@ -7,12 +7,12 @@ namespace uccl {
 EFAFactory efa_ctl;
 
 void EFAFactory::Init() {
-    for (int i = 0; i < NUM_DEVICES; i++) {
-        EFAFactory::InitDev(i);
+    for (int pdev_idx = 0; pdev_idx < NUM_DEVICES; pdev_idx++) {
+        EFAFactory::InitDev(pdev_idx);
     }
 }
 
-void EFAFactory::InitDev(int dev_idx) {
+void EFAFactory::InitDev(int pdev_idx) {
     struct EFADevice *dev = new struct EFADevice();
     struct ibv_device **device_list;
     struct ibv_context *context;
@@ -21,13 +21,13 @@ void EFAFactory::InitDev(int dev_idx) {
     int i, nb_devices;
 
     // Check if the device is already initialized.
-    DCHECK(efa_ctl.dev_map.find(dev_idx) == efa_ctl.dev_map.end());
+    DCHECK(efa_ctl.dev_map.find(pdev_idx) == efa_ctl.dev_map.end());
 
-    // Get Infiniband name from dev_idx.
-    DCHECK(util_efa_get_ib_name_from_dev_idx(dev_idx, dev->ib_name) == 0);
+    // Get Infiniband name from pdev_idx.
+    DCHECK(util_efa_get_ib_name_from_dev_idx(pdev_idx, dev->ib_name) == 0);
 
-    // Get IP address from dev_idx.
-    DCHECK(util_efa_get_ip_from_dev_idx(dev_idx, &dev->local_ip_str) == 0);
+    // Get IP address from pdev_idx.
+    DCHECK(util_efa_get_ip_from_dev_idx(pdev_idx, &dev->local_ip_str) == 0);
 
     // Get the list of RDMA devices.
     device_list = ibv_get_device_list(&nb_devices);
@@ -46,8 +46,8 @@ void EFAFactory::InitDev(int dev_idx) {
         fprintf(stderr, "No device found for %s\n", dev->ib_name);
         goto free_devices;
     }
-    DCHECK(i == dev_idx);
-    LOG(INFO) << "Found device: " << dev->ib_name << " at dev_idx " << i
+
+    LOG(INFO) << "Found device: " << dev->ib_name << " at pdev_idx " << i
               << " with gid_idx " << (uint32_t)EFA_GID_IDX;
 
     // Open the device.
@@ -86,7 +86,7 @@ void EFAFactory::InitDev(int dev_idx) {
 
     dev->dev_attr = dev_attr;
     dev->port_attr = port_attr;
-    dev->dev_idx = dev_idx;
+    dev->pdev_idx = pdev_idx;
     dev->efa_port_num = EFA_PORT_NUM;
     dev->context = context;
 
@@ -141,7 +141,7 @@ void EFAFactory::InitDev(int dev_idx) {
         }
     }
 
-    efa_ctl.dev_map.insert({dev_idx, dev});
+    efa_ctl.dev_map.insert({pdev_idx, dev});
     return;
 
 close_device:
@@ -152,19 +152,19 @@ error:
     throw std::runtime_error("Failed to initialize EFAFactory");
 }
 
-EFASocket *EFAFactory::CreateSocket(int gpu_idx, int dev_idx, int socket_idx) {
+EFASocket *EFAFactory::CreateSocket(int gpu_idx, int pdev_idx, int socket_idx) {
     std::lock_guard<std::mutex> lock(efa_ctl.socket_q_lock_);
     // Yang: magic here---we need to keep QPN allocated for each socket
     // continuous, so that they can be evenly distirbuted to differnet EFA
     // microcores; otherwise, interleaved QPNs for different sockets will cause
     // unstable performance.
-    auto socket = new EFASocket(gpu_idx, dev_idx, socket_idx);
+    auto socket = new EFASocket(gpu_idx, pdev_idx, socket_idx);
     efa_ctl.socket_q_.push_back(socket);
     return socket;
 }
 
-struct EFADevice *EFAFactory::GetEFADevice(int dev_idx) {
-    auto dev_iter = efa_ctl.dev_map.find(dev_idx);
+struct EFADevice *EFAFactory::GetEFADevice(int pdev_idx) {
+    auto dev_iter = efa_ctl.dev_map.find(pdev_idx);
     DCHECK(dev_iter != efa_ctl.dev_map.end());
     auto *dev = dev_iter->second;
     return dev;
@@ -180,8 +180,8 @@ void EFAFactory::Shutdown() {
     efa_ctl.dev_map.clear();
 }
 
-EFASocket::EFASocket(int gpu_idx, int dev_idx, int socket_idx)
-    : gpu_idx_(gpu_idx), dev_idx_(dev_idx), socket_idx_(socket_idx) {
+EFASocket::EFASocket(int gpu_idx, int pdev_idx, int socket_idx)
+    : gpu_idx_(gpu_idx), dev_idx_(pdev_idx), socket_idx_(socket_idx) {
     LOG(INFO) << "[EFA] creating gpu_idx " << gpu_idx << " dev_idx_ "
               << dev_idx_ << " socket_idx " << socket_idx;
 
@@ -189,8 +189,7 @@ EFASocket::EFASocket(int gpu_idx, int dev_idx, int socket_idx)
     memset(deficit_cnt_recv_wrs_for_ctrl_, 0,
            sizeof(deficit_cnt_recv_wrs_for_ctrl_));
 
-    // dev_idx is pdev.
-    auto *factory_dev = EFAFactory::GetEFADevice(dev_idx);
+    auto *factory_dev = EFAFactory::GetEFADevice(pdev_idx);
     context_ = factory_dev->context;
     pd_ = factory_dev->pd;
     gid_ = factory_dev->gid;

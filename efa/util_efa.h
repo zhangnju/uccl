@@ -248,7 +248,7 @@ struct EFADevice {
     struct ibv_device_attr dev_attr;
     struct ibv_port_attr port_attr;
 
-    uint8_t dev_idx;
+    uint8_t pdev_idx;
     uint8_t efa_port_num;
     union ibv_gid gid;
 
@@ -287,7 +287,7 @@ extern EFAFactory efa_ctl;
 
 class EFAFactory {
    public:
-    // dev_idx --> EFADevice pointer.
+    // pdev_idx --> EFADevice pointer.
     std::unordered_map<int, struct EFADevice *> dev_map;
 
     std::mutex socket_q_lock_;
@@ -296,17 +296,16 @@ class EFAFactory {
     // Not thread-safe; should be called just once.
     static void Init();
 
-    // dev_idx from [1, ..., NUM_DEVICES];
     // socket_idx from [0, ..., kNumEngines - 1].
-    static EFASocket *CreateSocket(int gpu_idx, int dev_idx, int socket_idx);
+    static EFASocket *CreateSocket(int gpu_idx, int pdev_idx, int socket_idx);
 
     // Getting a pointer to the struct EFADevice.
-    static struct EFADevice *GetEFADevice(int dev_idx);
+    static struct EFADevice *GetEFADevice(int pdev_idx);
 
     static void Shutdown();
 
    private:
-    static void InitDev(int dev_idx);
+    static void InitDev(int pdev_idx);
 };
 
 struct ConnMeta {
@@ -352,7 +351,7 @@ class EFASocket {
     uint16_t deficit_cnt_recv_wrs_[kMaxSrcDstQP];
     uint16_t deficit_cnt_recv_wrs_for_ctrl_[kMaxSrcDstQPCtrl];
 
-    EFASocket(int gpu_idx, int dev_idx, int socket_idx);
+    EFASocket(int gpu_idx, int pdev_idx, int socket_idx);
 
     struct ibv_qp *create_qp(struct ibv_cq *send_cq, struct ibv_cq *recv_cq,
                              uint32_t send_cq_size, uint32_t recv_cq_size);
@@ -361,7 +360,7 @@ class EFASocket {
 
    public:
     inline uint32_t gpu_idx() const { return gpu_idx_; }
-    inline uint32_t dev_idx() const { return dev_idx_; }
+    inline uint32_t pdev_idx() const { return dev_idx_; }
     inline uint32_t socket_idx() const { return socket_idx_; }
 
     // dest_qpn and dest_gid_idx is specified in FrameDesc; src_qp is determined
@@ -480,24 +479,24 @@ class EFASocket {
 /**
  * @brief This helper function gets the Infiniband name from the dev index.
  *
- * @param dev_idx
+ * @param pdev_idx
  * @param ib_name
  * @return int
  */
-static inline int util_efa_get_ib_name_from_dev_idx(int dev_idx,
+static inline int util_efa_get_ib_name_from_dev_idx(int pdev_idx,
                                                     char *ib_name) {
-    sprintf(ib_name, "%s", EFA_DEVICE_NAME_LIST[dev_idx].c_str());
+    sprintf(ib_name, "%s", EFA_DEVICE_NAME_LIST[pdev_idx].c_str());
     return 0;
 }
 
 /**
  * @brief This helper function gets the IP address of the device from dev index.
  *
- * @param dev_idx
+ * @param pdev_idx
  * @return int
  */
-static inline int util_efa_get_ip_from_dev_idx(int dev_idx, std::string *ip) {
-    *ip = get_dev_ip(ENA_DEVICE_NAME_LIST[dev_idx].c_str());
+static inline int util_efa_get_ip_from_dev_idx(int pdev_idx, std::string *ip) {
+    *ip = get_dev_ip(ENA_DEVICE_NAME_LIST[pdev_idx].c_str());
     return *ip == "" ? -1 : 0;
 }
 

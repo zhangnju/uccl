@@ -1088,7 +1088,7 @@ uint32_t UcclFlow::transmit_pending_packets(uint32_t budget) {
     last_received_rwnd_ -= pending_tx_frames_.size();
 
     socket_->post_send_wrs(pending_tx_frames_, src_qp_idx);
-    // printf("send with pdev: %d on engine %d\n", socket_->dev_idx(), local_engine_idx_);
+    // printf("send with pdev: %d on engine %d\n", socket_->pdev_idx(), local_engine_idx_);
     pending_tx_frames_.clear();
 
     return permitted_packets;
@@ -1358,7 +1358,7 @@ void UcclEngine::run() {
         
 
         if (frames.size()) {
-            // printf("recv with pdev: %d on engine %d\n", socket_->dev_idx(), local_engine_idx_);
+            // printf("recv with pdev: %d on engine %d\n", socket_->pdev_idx(), local_engine_idx_);
             process_rx_msg(frames);
         }
 
@@ -1494,7 +1494,7 @@ void UcclEngine::handle_install_flow_on_engine(Channel::CtrlMsg &ctrl_work) {
         new UcclFlow(local_ip_str_, remote_ip_str, local_meta, remote_meta,
                      local_engine_idx_, remote_engine_idx, socket_, channel_,
                      flow_id, active_flows_map_, is_sender);
-    auto *dev = EFAFactory::GetEFADevice(socket_->dev_idx());
+    auto *dev = EFAFactory::GetEFADevice(socket_->pdev_idx());
     flow->remote_ah_ = dev->create_ah(remote_meta->gid);
 
     std::tie(std::ignore, ret) = active_flows_map_.insert({flow_id, flow});
@@ -1956,7 +1956,7 @@ PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
 
     *pdev_offset = ((*conn_id.next_engine_recv)++) % kBundleNIC;
 
-    LOG(INFO) << "uccl_recv_scattered_async: pdev " << *pdev_offset << " engine_idx " << conn_id.engine_idx[*pdev_offset];
+    LOG(INFO) << "uccl_recv_scattered_async: pdev_offset " << *pdev_offset << " engine_idx " << conn_id.engine_idx[*pdev_offset];
 
     poll_ctx->num_unfinished = 1;
     poll_ctx->engine_idx = conn_id.engine_idx[*pdev_offset];
@@ -2059,9 +2059,9 @@ bool Endpoint::uccl_poll_once(PollCtx *ctx) {
     return true;
 }
 
-int Endpoint::uccl_regmr_dmabuf(int dev, void *addr, size_t len, int type,
+int Endpoint::uccl_regmr_dmabuf(int pdev, void *addr, size_t len, int type,
                                 int offset, int fd, struct ibv_mr **mr) {
-    auto factory_dev = EFAFactory::GetEFADevice(dev);
+    auto factory_dev = EFAFactory::GetEFADevice(pdev);
 
     *mr =
         ibv_reg_dmabuf_mr(factory_dev->pd, offset, len, (uint64_t)addr, fd,
@@ -2070,9 +2070,9 @@ int Endpoint::uccl_regmr_dmabuf(int dev, void *addr, size_t len, int type,
     return 0;
 }
 
-int Endpoint::uccl_regmr(int dev, void *addr, size_t len,
+int Endpoint::uccl_regmr(int pdev, void *addr, size_t len,
                          int type /*unsed for now*/, struct ibv_mr **mr) {
-    auto factory_dev = EFAFactory::GetEFADevice(dev);
+    auto factory_dev = EFAFactory::GetEFADevice(pdev);
 
     *mr =
         ibv_reg_mr(factory_dev->pd, addr, len, IBV_ACCESS_LOCAL_WRITE);

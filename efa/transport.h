@@ -742,11 +742,11 @@ class UcclEngine {
      * For now, we assume an engine is responsible for a single channel, but
      * future it may be responsible for multiple channels.
      */
-    UcclEngine(std::string local_ip_str, int gpu_idx, int dev_idx,
+    UcclEngine(std::string local_ip_str, int gpu_idx, int pdev_idx,
                int socket_idx, Channel *channel)
         : local_ip_str_(local_ip_str),
           local_engine_idx_(socket_idx),
-          socket_(EFAFactory::CreateSocket(gpu_idx, dev_idx, socket_idx)),
+          socket_(EFAFactory::CreateSocket(gpu_idx, pdev_idx, socket_idx)),
           channel_(channel),
           last_periodic_tsc_(rdtsc()),
           periodic_ticks_(0),
@@ -905,9 +905,9 @@ class Endpoint {
     bool uccl_poll(PollCtx *ctx);
     bool uccl_poll_once(PollCtx *ctx);
 
-    int uccl_regmr_dmabuf(int dev, void *addr, size_t len, int type, int offset,
+    int uccl_regmr_dmabuf(int pdev, void *addr, size_t len, int type, int offset,
                           int fd, struct ibv_mr **mr);
-    int uccl_regmr(int dev, void *addr, size_t len, int type /*unsed for now*/,
+    int uccl_regmr(int pdev, void *addr, size_t len, int type /*unsed for now*/,
                    struct ibv_mr **mr);
     void uccl_deregmr(struct Mhandle *mhandle);
 

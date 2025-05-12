@@ -81,6 +81,7 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x NCCL_GDRCOPY_FLUSH_ENABLE=1 \
       -x NCCL_GDRCOPY_SYNC_ENABLE=0 \
       -x NCCL_GDRCOPY_FIFO_ENABLE=0 \
+      -x NCCL_PROTO=Simple \
       ${NCCL_TESTS_PATH} \
       -f 2 -b 1K -e 1G \
       -w 5 -n 10 \

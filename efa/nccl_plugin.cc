@@ -12,6 +12,16 @@ using namespace uccl;
 
 const char *PLUGIN_NAME = "EFA_Plugin";
 
+/**
+ * *** Concepts ***
+ * * vdev: virtual device which bundles multiple physical devices. For p5en, each vdev bundles 2 physical devices.
+ * * pdev: physical device. For p5en, there are 16 physical devices.
+ *
+ * *** Rules ***
+ * * One GPU always uses one vdev. UCCL does load balance across pdevs in the same vdev.
+ * * We always use get_pdev(vdev) for connection setup.
+ */
+
 class UcclRequestBuffPool : public BuffPool {
     static constexpr size_t num_elements =
         kMaxUnconsumedRxMsgbufs;  // Send and receive.
@@ -95,7 +105,8 @@ ncclResult_t pluginInit(ncclDebugLogger_t logFunction) {
 }
 
 ncclResult_t pluginDevices(int *ndev) {
-    *ndev = 4;
+    // Every GPU only uses one vdev, so let ndev = # of GPUs.
+    *ndev = kNumVdevices;
     return ncclSuccess;
 }
 
@@ -112,7 +123,8 @@ ncclResult_t pluginPciPath(const char *ib_name, char **path) {
     return ncclSuccess;
 }
 
-ncclResult_t pluginGetProperties(int pdev, ncclNetProperties_v8_t *props) {
+ncclResult_t pluginGetProperties(int vdev, ncclNetProperties_v8_t *props) {
+    auto pdev = get_pdev(vdev);
     auto factory_dev = EFAFactory::GetEFADevice(pdev);
     props->name = factory_dev->ib_name;
 
@@ -127,8 +139,12 @@ ncclResult_t pluginGetProperties(int pdev, ncclNetProperties_v8_t *props) {
               << " name " << props->name << " pciPath " << props->pciPath;
 
     props->ptrSupport = NCCL_PTR_HOST;
+    
+    // TODO: add check
+    props->ptrSupport |= NCCL_PTR_CUDA;
+    
     if (factory_dev->dma_buf_support)
-        props->ptrSupport |= NCCL_PTR_CUDA | NCCL_PTR_DMABUF;
+        props->ptrSupport |= NCCL_PTR_DMABUF;
 
     // If you regMr has a fast registration cache, set to 1. If set to 0, user
     // buffer registration may be disabled.
@@ -318,15 +334,22 @@ ncclResult_t pluginRegMr(void *collComm, void *data, size_t size, int type,
                          void **mhandle) {
     int ret;
     struct UcclBaseComm *base = (struct UcclBaseComm *)collComm;
-    auto dev_idx = get_dev_idx_by_engine_idx(base->conn_id.engine_idx);
     auto vdev_idx = base->vdev;
     checkMemoryLocation(data);
 
     LOG(INFO) << "pluginRegMr, size " << size << " flow_id "
               << base->conn_id.flow_id << " vdev_idx " << vdev_idx
               << " data ptr " << std::hex << data;
-    ret = ep->uccl_regmr(dev_idx, data, size, type, (struct Mhandle **)mhandle);
-    reg_cnt++;
+    
+    struct Mhandle **mh = (struct Mhandle **)mhandle;
+    *mh = new Mhandle();
+
+    // Register MR on all pdevs.
+    for (int i = 0; i < kBundleNIC; i++) {
+        auto pdev = vdev_idx * kBundleNIC + i;
+        ret = ep->uccl_regmr(pdev, data, size, type, &((*mh)->mr[i]));
+        reg_cnt++;
+    }
 
     return ret == 0 ? ncclSuccess : ncclInternalError;
 }
@@ -336,16 +359,23 @@ ncclResult_t pluginRegMrDmaBuf(void *collComm, void *data, size_t size,
                                void **mhandle) {
     int ret;
     struct UcclBaseComm *base = (struct UcclBaseComm *)collComm;
-    auto dev_idx = get_dev_idx_by_engine_idx(base->conn_id.engine_idx);
     auto vdev_idx = base->vdev;
     checkMemoryLocation(data);
 
     LOG(INFO) << "pluginRegMrDmaBuf, size " << size << " flow_id "
               << base->conn_id.flow_id << " vdev_idx " << vdev_idx
               << " data ptr " << std::hex << data;
-    ret = ep->uccl_regmr_dmabuf(dev_idx, data, size, type, offset, fd,
-                                (struct Mhandle **)mhandle);
-    reg_cnt++;
+    
+    struct Mhandle **mh = (struct Mhandle **)mhandle;
+    *mh = new Mhandle();
+    
+    // Register MR on all pdevs.
+    for (int i = 0; i < kBundleNIC; i++) {
+        auto pdev = vdev_idx * kBundleNIC + i;
+        ret = ep->uccl_regmr_dmabuf(pdev, data, size, type, offset, fd,
+                                    &((*mh)->mr[i]));
+        reg_cnt++;
+    }
 
     return ret == 0 ? ncclSuccess : ncclInternalError;
 }
@@ -448,7 +478,7 @@ ncclResult_t pluginIrecvScattered(void *recvComm, int *tags, void *mhandles,
     req->type = ReqRxScattered;
     req->n = 1;
     // Using plugin-allocated memory so nccl does not need to manage it.
-    req->poll_ctx = ep->uccl_recv_scattered_async(conn_id, req, mhs);
+    req->poll_ctx = ep->uccl_recv_scattered_async(conn_id, req, mhs, &req->pdev);
     req->req_pool = (void *)rcomm->base.uccl_req_pool.get();
 
     *request = req;
@@ -469,7 +499,7 @@ ncclResult_t pluginIrecvFreePtrs(void *recvComm, void *request) {
 
     struct UcclRecvComm *rcomm = (struct UcclRecvComm *)recvComm;
     auto conn_id = rcomm->base.conn_id;
-    ep->uccl_recv_free_ptrs(conn_id, req->iov_n, req->iov_addrs);
+    ep->uccl_recv_free_ptrs(conn_id, req->iov_n, req->iov_addrs, req->pdev);
 
     auto uccl_req_pool = reinterpret_cast<UcclRequestBuffPool *>(req->req_pool);
     uccl_req_pool->free_buff(reinterpret_cast<uint64_t>(req));
@@ -525,12 +555,15 @@ ncclResult_t pluginTest(void *request, int *done, int *size) {
         *done = 1;
         if (req->type == ReqTx) {
             size[0] = req->send_len;
+            LOG(INFO) << "pluginTest ReqTx done: " << size[0];
         } else if (req->type == ReqRx) {
             for (int i = 0; i < req->n; i++) size[i] = req->recv_len[i];
+            LOG(INFO) << "pluginTest ReqRx done: " << size[0];
         } else if (req->type == ReqFlush) {
             // Do nothing.
         } else if (req->type == ReqRxScattered) {
             size[0] = req->recv_len[0];
+            LOG(INFO) << "pluginTest ReqRxScattered done: " << size[0];
         }
         // request from ReqRxScattered will be freed by pluginIrecvFreePtrs
         if (req->type != ReqRxScattered) {

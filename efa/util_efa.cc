@@ -189,6 +189,7 @@ EFASocket::EFASocket(int gpu_idx, int dev_idx, int socket_idx)
     memset(deficit_cnt_recv_wrs_for_ctrl_, 0,
            sizeof(deficit_cnt_recv_wrs_for_ctrl_));
 
+    // dev_idx is pdev.
     auto *factory_dev = EFAFactory::GetEFADevice(dev_idx);
     context_ = factory_dev->context;
     pd_ = factory_dev->pd;
@@ -210,7 +211,7 @@ EFASocket::EFASocket(int gpu_idx, int dev_idx, int socket_idx)
     auto ret = cudaGetDevice(&old_gpu_idx);
     CHECK(ret == cudaSuccess) << "cudaGetDevice failed ";
     ret = cudaSetDevice(gpu_idx);
-    CHECK(ret == cudaSuccess) << "cudaSetDevice failed ";
+    CHECK(ret == cudaSuccess) << "cudaSetDevice failed " << old_gpu_idx << " " << gpu_idx;
 
     // Allocate memory for packet data.
     void *pkt_data_buf_ = nullptr;

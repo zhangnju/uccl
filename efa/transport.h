@@ -29,7 +29,6 @@
 
 #include "cuda_runtime.h"
 #include "driver_types.h"
-#include "eqds.h"
 #include "scattered_memcpy.cuh"
 #include "transport_cc.h"
 #include "transport_config.h"
@@ -47,12 +46,13 @@ typedef uint64_t FlowID;
 
 struct ConnID {
     FlowID flow_id;       // Used for UcclEngine to look up UcclFlow.
-    uint32_t engine_idx;  // Used for Endpoint to locate the right engine.
+    // uint32_t engine_idx;  // Used for Endpoint to locate the right engine.
+    uint32_t engine_idx[kBundleNIC];
     int boostrap_id;      // Used for bootstrap connection with the peer.
 };
 
 struct Mhandle {
-    struct ibv_mr *mr;
+    struct ibv_mr *mr[kBundleNIC];
 };
 
 struct alignas(64) PollCtx {
@@ -124,7 +124,7 @@ struct UcclRequest {
     int iov_lens[kMaxIovs];
     int dst_offsets[kMaxIovs];
     int iov_n;
-    int pad;
+    int pdev;
     void *ptrs[32];
     /***********************/
 };
@@ -157,6 +157,7 @@ class Channel {
             UcclRequest *req;
         };
         Mhandle *mhandle;
+        int pdev;
         FlowID flow_id;
         // A list of FrameDesc bw deser_th and engine_th.
         FrameDesc *deser_msgs;
@@ -443,8 +444,7 @@ class UcclFlow {
     UcclFlow(std::string local_ip_str, std::string remote_ip_str,
              ConnMeta *local_meta, ConnMeta *remote_meta,
              uint32_t local_engine_idx, uint32_t remote_engine_idx,
-             EFASocket *socket, eqds::CreditQPContext *credit_qp_ctx,
-             eqds::EQDSChannel *eqds_channel, Channel *channel, FlowID flow_id,
+             EFASocket *socket, Channel *channel, FlowID flow_id,
              std::unordered_map<FlowID, UcclFlow *> &active_flows_map_,
              bool is_sender)
         : remote_ip_str_(remote_ip_str),
@@ -454,8 +454,6 @@ class UcclFlow {
           local_engine_idx_(local_engine_idx),
           remote_engine_idx_(remote_engine_idx),
           socket_(CHECK_NOTNULL(socket)),
-          credit_qp_ctx_(credit_qp_ctx),
-          eqds_channel_(eqds_channel),
           channel_(channel),
           flow_id_(flow_id),
           pcb_(),
@@ -463,8 +461,7 @@ class UcclFlow {
           timely_g_(),
           tx_tracking_(socket, channel),
           rx_tracking_(socket, channel, active_flows_map_),
-          is_sender_(is_sender),
-          eqds_cc_() {
+          is_sender_(is_sender) {
         // Initing per-flow CC states.
         timely_g_.init(&pcb_);
         if constexpr (kSenderCCType == SenderCCType::kTimelyPP) {
@@ -480,13 +477,6 @@ class UcclFlow {
         }
 
         peer_flow_id_ = get_peer_flow_id(flow_id);
-
-        if constexpr (kReceiverCCType == ReceiverCCType::kEQDS) {
-            eqds_cc_.send_pullpacket =
-                [this](const PullQuanta &pullno) -> bool {
-                return this->send_pullpacket(pullno);
-            };
-        }
     }
     ~UcclFlow() {
         delete local_meta_;
@@ -547,23 +537,9 @@ class UcclFlow {
 
     inline swift::Pcb *get_pcb() { return &pcb_; }
 
-    inline eqds::EQDSCC *get_eqds_cc() { return &eqds_cc_; }
-
-    // [Thread-safe] Request pacer to grant credit to this flow.
-    inline void request_pull() {
-        eqds::EQDSChannel::Msg msg = {
-            .opcode = eqds::EQDSChannel::Msg::Op::kRequestPull,
-            .eqds_cc = &eqds_cc_,
-        };
-        while (jring_mp_enqueue_bulk(eqds_channel_->cmdq_, &msg, 1, nullptr) !=
-               1) {
-        }
-    }
-
    private:
     void process_ack(const UcclPktHdr *ucclh);
 
-    void process_credit(const UcclPullHdr *ucclh);
 
     void fast_retransmit();
     bool rto_retransmit(FrameDesc *msgbuf, uint32_t seqno);
@@ -571,14 +547,6 @@ class UcclFlow {
     inline bool can_rtx(FrameDesc *msgbuf) {
         // Avoid too many inflight WQEs.
         if (socket_->send_queue_wrs() >= kMaxUnackedPktsPerEngine) return false;
-
-        // // The following code may have BUG.
-        // if constexpr (kReceiverCCType == ReceiverCCType::kEQDS) {
-        //     if (eqds_cc_.credit() < msgbuf->get_pkt_data_len()) return false;
-        //     if (!eqds_cc_.spend_credit(msgbuf->get_pkt_data_len())) return
-        //     false;
-        // }
-
         return true;
     }
 
@@ -645,10 +613,6 @@ class UcclFlow {
     // The underlying EFASocket.
     EFASocket *socket_;
 
-    eqds::CreditQPContext *credit_qp_ctx_;
-    eqds::EQDSChannel *eqds_channel_;
-    uint32_t credit_qpidx_rr_ = 0;
-
     // The channel this flow belongs to.
     Channel *channel_;
     // FlowID of this flow.
@@ -674,9 +638,6 @@ class UcclFlow {
     swift::CubicCtl *cubic_pp_;
     // Peer flow_id used for communication.
     FlowID peer_flow_id_ = 0;
-
-    // EQDS
-    eqds::EQDSCC eqds_cc_;
 
     uint32_t last_received_rwnd_ = kMaxUnconsumedRxMsgbufs;
 
@@ -780,15 +741,11 @@ class UcclEngine {
      * future it may be responsible for multiple channels.
      */
     UcclEngine(std::string local_ip_str, int gpu_idx, int dev_idx,
-               int socket_idx, Channel *channel,
-               eqds::CreditQPContext *credit_qp_ctx,
-               eqds::EQDSChannel *eqds_channel)
+               int socket_idx, Channel *channel)
         : local_ip_str_(local_ip_str),
           local_engine_idx_(socket_idx),
           socket_(EFAFactory::CreateSocket(gpu_idx, dev_idx, socket_idx)),
           channel_(channel),
-          credit_qp_ctx_(credit_qp_ctx),
-          eqds_channel_(eqds_channel),
           last_periodic_tsc_(rdtsc()),
           periodic_ticks_(0),
           kSlowTimerIntervalTsc_(us_to_cycles(kSlowTimerIntervalUs, freq_ghz)) {
@@ -848,10 +805,6 @@ class UcclEngine {
     // AFXDP socket used for send/recv packets.
     EFASocket *socket_;
 
-    // Receiver-driven CC.
-    eqds::CreditQPContext *credit_qp_ctx_;
-    eqds::EQDSChannel *eqds_channel_;
-
     // UcclFlow map
     std::unordered_map<FlowID, UcclFlow *> active_flows_map_;
     // Control plane channel with Endpoint.
@@ -904,9 +857,6 @@ class Endpoint {
     // Mapping from unique (within this engine) flow_id to the boostrap fd.
     std::unordered_map<FlowID, int> fd_map_;
 
-    // Each physical device has its own EQDS pacer.
-    eqds::EQDS *eqds_[NUM_DEVICES] = {};
-
    public:
     Endpoint();
     ~Endpoint();
@@ -940,8 +890,8 @@ class Endpoint {
     PollCtx *uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                              Mhandle *mhandle);
     PollCtx *uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
-                                       Mhandle *mhandle);
-    void uccl_recv_free_ptrs(ConnID conn_id, int iov_n, void **iov_addrs);
+                                       Mhandle *mhandle, int *pdev);
+    void uccl_recv_free_ptrs(ConnID conn_id, int iov_n, void **iov_addrs, int pdev);
     PollCtx *uccl_recv_multi_async(ConnID conn_id, void **data, int *len_p,
                                    Mhandle **mhandle, int n);
     PollCtx *uccl_flush_async(ConnID conn_id, void **data, int *len_p,
@@ -952,9 +902,9 @@ class Endpoint {
     bool uccl_poll_once(PollCtx *ctx);
 
     int uccl_regmr_dmabuf(int dev, void *addr, size_t len, int type, int offset,
-                          int fd, struct Mhandle **mhandle);
+                          int fd, struct ibv_mr **mr);
     int uccl_regmr(int dev, void *addr, size_t len, int type /*unsed for now*/,
-                   struct Mhandle **mhandle);
+                   struct ibv_mr **mr);
     void uccl_deregmr(struct Mhandle *mhandle);
 
    private:
@@ -964,8 +914,16 @@ class Endpoint {
     inline int find_least_loaded_engine_idx_and_update(int vdev_idx,
                                                        FlowID flow_id,
                                                        bool is_sender);
+    inline int find_least_loaded_engine_idx_and_update_for_pdev(int pdev_idx,
+                                                       FlowID flow_id,
+                                                       bool is_sender);
     inline int find_dedicated_engine_idx(int vdev_idx, bool is_sender);
     inline void fence_and_clean_ctx(PollCtx *ctx);
+
+    inline int lb_for_vdev() {
+        // return U32Rand(0, UINT32_MAX) % kBundleNIC;
+        return 0;
+    }
 
     std::mutex stats_mu_;
     std::condition_variable stats_cv_;
@@ -1019,8 +977,12 @@ static inline uint32_t get_gpu_idx_by_engine_idx(uint32_t engine_idx) {
     return engine_idx / kNumEnginesPerVdev;
 }
 
-static inline uint32_t get_dev_idx_by_engine_idx(uint32_t engine_idx) {
-    return engine_idx / (kNumEnginesPerVdev * 2);
+static inline uint32_t get_vdev_idx_by_engine_idx(uint32_t engine_idx) {
+    return engine_idx / kNumEnginesPerVdev;
+}
+
+static inline uint32_t get_pdev_idx_by_engine_idx(uint32_t engine_idx) {
+    return engine_idx / kBundleNIC;
 }
 
 static inline uint32_t get_engine_off_by_engine_idx(uint32_t engine_idx) {
@@ -1032,7 +994,11 @@ static inline uint32_t get_dev_idx_by_gpu_idx(uint32_t gpu_idx) {
     return gpu_idx / 2;
 }
 
-static inline int get_pdev(int vdev) { return vdev / 2; }
+static inline int get_pdev(int vdev) { 
+    // vdev: 0, 1, 2, 3, 4, 5, 6, 7
+    // pdev: 0, 2, 4, 6, 8, 10, 12, 14
+    return vdev * 2;
+}
 static inline int get_vdev(int pdev) { return pdev * 2; }
 
 }  // namespace uccl

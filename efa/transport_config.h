@@ -22,7 +22,6 @@ enum class SenderCCType {
 };
 enum class ReceiverCCType {
     kNone,
-    kEQDS,
 };
 static constexpr SenderCCType kSenderCCType = SenderCCType::kCubic;
 static constexpr ReceiverCCType kReceiverCCType = ReceiverCCType::kNone;
@@ -34,11 +33,12 @@ static_assert(
 // #define P4D
 #define P5EN
 
+static const uint32_t kBundleNIC = 2;
 static const uint32_t kNumVdevices = 8;        // # of vEFA/GPUs.
-static const uint32_t kNumEnginesPerVdev = 2;  // # of engines per vEFA/GPU.
+static const uint32_t kNumEnginesPerVdev = kBundleNIC * 2;  // # of engines per vEFA/GPU.
 static const uint32_t kNumEngines = kNumVdevices * kNumEnginesPerVdev;
 static const bool kSplitSendRecvEngine =
-    true;  // Split sender/recevier flows to dedicated engines.
+    false;  // Split sender/recevier flows to dedicated engines.
 
 /// Interface configuration.
 #ifdef P4D
@@ -52,7 +52,7 @@ static constexpr double kLinkBandwidth = 100.0 * 1e9 / 8;  // 100Gbps
 #endif
 
 #ifdef P5EN
-static const uint8_t NUM_DEVICES = (kNumVdevices + 1) / 2;
+static const uint8_t NUM_DEVICES = kNumVdevices * 2;
 static const uint8_t EFA_GID_IDX = 0;
 static const std::string EFA_DEVICE_NAME_LIST[] = {
     "rdmap85s0",
@@ -90,7 +90,7 @@ static const std::string ENA_DEVICE_NAME_LIST[] = {
     "enp148s0",
     "enp149s0",
     };
-static constexpr double kLinkBandwidth = 200.0 * 1e9 / 8;  // 200Gbps
+static constexpr double kLinkBandwidth = 400.0 * 1e9 / 8;  // 400Gbps
 #endif
 
 
@@ -115,10 +115,10 @@ static uint32_t NUM_CPUS = std::thread::hardware_concurrency();
 // uses the first 24 and last 24 cores as specified in p4d-24xl-topo.xml). The
 // two numbers are for numa 0 and 1 separately. GPU 0-3 + NIC 0-1 are on numa 0,
 // and GPU 4-7 + NIC 2-3 are on numa 1.
-static const uint32_t ENGINE_CPU_START[2] = {NUM_CPUS / 2, NUM_CPUS / 4};
-static const uint32_t PACER_CPU_START[2] = {
-    ENGINE_CPU_START[0] + 8 /* 4 VDEV * 2 EnginePerVdev */,
-    ENGINE_CPU_START[1] + 8 /* 4 VDEV * 2 EnginePerVdev */};
+
+// NUMA node0 CPU(s):      0-47,96-143
+// NUMA node1 CPU(s):      48-95,144-191
+static const uint32_t ENGINE_CPU_START[2] = {NUM_CPUS / 2 + 16, NUM_CPUS / 4 + 16};
 static const uint16_t BASE_PORT = 10000;
 static const uint64_t NUM_FRAMES = 65536 * 4;  // # of frames.
 static const uint32_t RECV_BATCH_SIZE = 32;
@@ -131,7 +131,6 @@ static const uint64_t MAX_FLOW_ID = 1000000;
 static const uint32_t kMaxSendWr = 1024;
 static const uint32_t kMaxRecvWr = 256;
 static const uint32_t kMaxSendRecvWrForCtrl = 1024;
-static const uint32_t kMaxSendRecvWrForCredit = 1024;
 static const uint32_t kMaxCqeTotal = 16384;
 static const uint32_t kMaxPollBatch = 32;
 static const uint32_t kMaxRecvWrDeficit = 32;
@@ -145,23 +144,14 @@ static const uint32_t kMaxDstQP = 26;  // # of paths/QPs for data per src qp.
 static const uint32_t kMaxSrcQP = 10;
 static const uint32_t kMaxDstQPCtrl = 8;  // # of paths/QPs for control.
 static const uint32_t kMaxSrcQPCtrl = 8;
-static const uint32_t kMaxDstQPCredit = 8;  // # of paths/QPs for credit.
-static const uint32_t kMaxSrcQPCredit = 8;
 static constexpr uint32_t kMaxSrcDstQP = std::max(kMaxSrcQP, kMaxDstQP);
 static constexpr uint32_t kMaxSrcDstQPCtrl =
     std::max(kMaxSrcQPCtrl, kMaxDstQPCtrl);
-static constexpr uint32_t kMaxSrcDstQPCredit =
-    std::max(kMaxSrcQPCredit, kMaxDstQPCredit);
 static const uint32_t kMaxPath = kMaxDstQP * kMaxSrcQP;
 static const uint32_t kMaxPathCtrl = kMaxDstQPCtrl * kMaxSrcQPCtrl;
-// This check is not enough as the kMaxSendWr/kMaxRecvWr also affects the number
-// of QPs.
-static_assert((kMaxDstQP + kMaxDstQPCtrl) * kNumEnginesPerVdev * 2 +
-                  kMaxDstQPCredit <=
-              EFA_MAX_QPS);
-static_assert((kMaxSrcQP + kMaxSrcQPCtrl) * kNumEnginesPerVdev * 2 +
-                  kMaxSrcQPCredit <=
-              EFA_MAX_QPS);
+// This check is not enough as the kMaxSendWr/kMaxRecvWr also affects the number of QPs.
+// static_assert((kMaxDstQP + kMaxDstQPCtrl) * kNumEnginesPerVdev <= EFA_MAX_QPS);
+// static_assert((kMaxSrcQP + kMaxSrcQPCtrl) * kNumEnginesPerVdev <= EFA_MAX_QPS);
 
 // CC parameters.
 static const double kMaxUnackedPktsPP = 1u;

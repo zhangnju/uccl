@@ -130,10 +130,10 @@ int main(int argc, char* argv[]) {
             auto* dev = EFAFactory::GetEFADevice(dev_idx);
 
             cudaMalloc(&data[i], kTestMsgSize);
-            mh[i].mr = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
+            mh[i].mr[0] = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
                                   IBV_ACCESS_LOCAL_WRITE);
             cudaMalloc(&data2[i], kTestMsgSize);
-            mh2[i].mr = ibv_reg_mr(dev->pd, data2[i], kTestMsgSize,
+            mh2[i].mr[0] = ibv_reg_mr(dev->pd, data2[i], kTestMsgSize,
                                    IBV_ACCESS_LOCAL_WRITE);
         }
         cudaSetDevice(0);
@@ -432,10 +432,10 @@ int main(int argc, char* argv[]) {
             auto* dev = EFAFactory::GetEFADevice(dev_idx);
 
             cudaMalloc(&data[i], kTestMsgSize);
-            mh[i].mr = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
+            mh[i].mr[0] = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
                                   IBV_ACCESS_LOCAL_WRITE);
             cudaMalloc(&data2[i], kTestMsgSize);
-            mh2[i].mr = ibv_reg_mr(dev->pd, data2[i], kTestMsgSize,
+            mh2[i].mr[0] = ibv_reg_mr(dev->pd, data2[i], kTestMsgSize,
                                    IBV_ACCESS_LOCAL_WRITE);
         }
         cudaSetDevice(0);

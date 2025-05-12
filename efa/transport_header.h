@@ -22,7 +22,6 @@ struct __attribute__((packed)) UcclPktHdr {
         kAck = 0b10,            // ACK packet.
         kDataRttProbe = 0b100,  // RTT probing packet.
         kAckRttProbe = 0b1000,  // RTT probing packet.
-        kCredit = 0b10000,      // Credit packet.
     };
     UcclFlags net_flags;  // Network flags.
     uint8_t msg_flags;    // Field to reflect the `FrameDesc' flags.

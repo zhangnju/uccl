@@ -7,6 +7,9 @@
 
 # make MPI=1 MPI_HOME=/opt/amazon/openmpi CUDA_HOME=/usr/local/cuda NCCL_HOME=/home/xzhiying/uccl_rdma_zc/nccl/build -j
 
+# Fix PMIX ERROR: OUT-OF-RESOURCE due to /tmp space is full
+# sudo find /tmp -user xzhiying -delete
+
 #SBATCH --job-name=nccl-tests
 ##SBATCH --output=nccl-tests.%j.out
 #SBATCH --output=nccl-tests.alltoall.out
@@ -19,6 +22,7 @@
 ROOT_DIR=/home/xzhiying/zhongjie_dev
 
 NVLINK_OFF=0
+PXN_DISABLE=0
 
 TEST=${1:-"uccl"}
 
@@ -34,6 +38,10 @@ if [ "$TEST" = "nccl" ]; then
 
       NCCL_P2P_NET_CHUNKSIZE=524288
       NCCL_BUFFSIZE=8388608
+
+      COPY_CHANNELS=-1
+      CHANNELS_NET_PEER=-1
+
 else
       LIBNCCL_PATH="${ROOT_DIR}/nccl/build/lib/libnccl.so"
       NCCL_TESTS_PATH="${ROOT_DIR}/nccl-tests/build"
@@ -41,8 +49,12 @@ else
 
       LD_LIBRARY_PATH="/home/xzhiying/local_libs:${LD_LIBRARY_PATH}"
 
-      NCCL_P2P_NET_CHUNKSIZE=131072
+      NCCL_P2P_NET_CHUNKSIZE=262144
       NCCL_BUFFSIZE=1048576
+
+      COPY_CHANNELS=8
+      CHANNELS_NET_PEER=1
+
 fi
 
 # alltoall_perf all_reduce_perf all_gather_perf
@@ -60,8 +72,17 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x NCCL_P2P_DISABLE=${NVLINK_OFF} \
       -x NCCL_SHM_DISABLE=${NVLINK_OFF} \
       -x NCCL_NET_DISABLE=0 \
+      -x NCCL_MAX_NCHANNELS=${COPY_CHANNELS} \
+      -x NCCL_MIN_NCHANNELS=${COPY_CHANNELS} \
+      -x NCCL_NCHANNELS_PER_NET_PEER=${CHANNELS_NET_PEER} \
+      -x NCCL_PXN_DISABLE=${PXN_DISABLE} \
+      -x NCCL_NET_GDR_LEVEL=SYS \
+      -x NCCL_GDRCOPY_ENABLE=1 \
+      -x NCCL_GDRCOPY_FLUSH_ENABLE=1 \
+      -x NCCL_GDRCOPY_SYNC_ENABLE=0 \
+      -x NCCL_GDRCOPY_FIFO_ENABLE=0 \
       ${NCCL_TESTS_PATH} \
-      -f 2 -b 1K -e 4G \
+      -f 2 -b 1K -e 1G \
       -w 5 -n 10 \
       -c 1 -g 1 -t 1
 

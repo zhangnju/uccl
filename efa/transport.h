@@ -49,8 +49,8 @@ struct ConnID {
     // uint32_t engine_idx;  // Used for Endpoint to locate the right engine.
     uint32_t engine_idx[kBundleNIC];
     int boostrap_id;      // Used for bootstrap connection with the peer.
-    uint32_t next_engine_send;
-    uint32_t next_engine_recv;
+    uint32_t *next_engine_send;
+    uint32_t *next_engine_recv;
 };
 
 struct Mhandle {
@@ -126,7 +126,7 @@ struct UcclRequest {
     int iov_lens[kMaxIovs];
     int dst_offsets[kMaxIovs];
     int iov_n;
-    uint32_t pdev;
+    uint32_t pdev_offset;
     void *ptrs[32];
     /***********************/
 };
@@ -159,7 +159,7 @@ class Channel {
             UcclRequest *req;
         };
         Mhandle *mhandle;
-        uint32_t pdev;
+        uint32_t pdev_offset;
         FlowID flow_id;
         // A list of FrameDesc bw deser_th and engine_th.
         FrameDesc *deser_msgs;
@@ -859,6 +859,8 @@ class Endpoint {
     // Mapping from unique (within this engine) flow_id to the boostrap fd.
     std::unordered_map<FlowID, int> fd_map_;
 
+    std::unordered_map<FlowID, std::pair<uint32_t *, uint32_t *>> next_engine_ptr_map_;
+
    public:
     Endpoint();
     ~Endpoint();
@@ -892,8 +894,8 @@ class Endpoint {
     PollCtx *uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                              Mhandle *mhandle);
     PollCtx *uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
-                                       Mhandle *mhandle, uint32_t *pdev);
-    void uccl_recv_free_ptrs(ConnID conn_id, int iov_n, void **iov_addrs, int pdev);
+                                       Mhandle *mhandle, uint32_t *pdev_offset);
+    void uccl_recv_free_ptrs(ConnID conn_id, int iov_n, void **iov_addrs, uint32_t pdev_offset);
     PollCtx *uccl_recv_multi_async(ConnID conn_id, void **data, int *len_p,
                                    Mhandle **mhandle, int n);
     PollCtx *uccl_flush_async(ConnID conn_id, void **data, int *len_p,

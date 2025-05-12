@@ -478,7 +478,7 @@ ncclResult_t pluginIrecvScattered(void *recvComm, int *tags, void *mhandles,
     req->type = ReqRxScattered;
     req->n = 1;
     // Using plugin-allocated memory so nccl does not need to manage it.
-    req->poll_ctx = ep->uccl_recv_scattered_async(conn_id, req, mhs, &req->pdev);
+    req->poll_ctx = ep->uccl_recv_scattered_async(conn_id, req, mhs, &req->pdev_offset);
     req->req_pool = (void *)rcomm->base.uccl_req_pool.get();
 
     *request = req;
@@ -499,7 +499,7 @@ ncclResult_t pluginIrecvFreePtrs(void *recvComm, void *request) {
 
     struct UcclRecvComm *rcomm = (struct UcclRecvComm *)recvComm;
     auto conn_id = rcomm->base.conn_id;
-    ep->uccl_recv_free_ptrs(conn_id, req->iov_n, req->iov_addrs, req->pdev);
+    ep->uccl_recv_free_ptrs(conn_id, req->iov_n, req->iov_addrs, req->pdev_offset);
 
     auto uccl_req_pool = reinterpret_cast<UcclRequestBuffPool *>(req->req_pool);
     uccl_req_pool->free_buff(reinterpret_cast<uint64_t>(req));

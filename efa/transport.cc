@@ -627,7 +627,7 @@ void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
     auto *app_buf_cursor = tx_work.data;
     auto remaining_bytes = tx_work.len;
     // Use the MR of the corresponding pdev.
-    auto *app_mr = tx_work.mhandle->mr[tx_work.pdev];
+    auto *app_mr = tx_work.mhandle->mr[tx_work.pdev_offset];
     auto *poll_ctx = tx_work.poll_ctx;
 
     while (remaining_bytes > 0 || tx_work.len == 0) {
@@ -1088,6 +1088,7 @@ uint32_t UcclFlow::transmit_pending_packets(uint32_t budget) {
     last_received_rwnd_ -= pending_tx_frames_.size();
 
     socket_->post_send_wrs(pending_tx_frames_, src_qp_idx);
+    // printf("send with pdev: %d on engine %d\n", socket_->dev_idx(), local_engine_idx_);
     pending_tx_frames_.clear();
 
     return permitted_packets;
@@ -1357,6 +1358,7 @@ void UcclEngine::run() {
         
 
         if (frames.size()) {
+            // printf("recv with pdev: %d on engine %d\n", socket_->dev_idx(), local_engine_idx_);
             process_rx_msg(frames);
         }
 
@@ -1644,6 +1646,11 @@ Endpoint::~Endpoint() {
         for (auto &[flow_id, boostrap_id] : fd_map_) {
             close(boostrap_id);
         }
+
+        for (auto &[flow_id, next_engine_ptr] : next_engine_ptr_map_) {
+            free(next_engine_ptr.first);
+            free(next_engine_ptr.second);
+        }
     }
 
     static std::once_flag flag_once;
@@ -1762,6 +1769,14 @@ ConnID Endpoint::uccl_connect(int local_vdev, int remote_vdev,
                             is_sender);
         conn_id.engine_idx[i] = local_engine_idx;
     }
+    conn_id.next_engine_send = (uint32_t *)malloc(sizeof(uint32_t));
+    conn_id.next_engine_recv = (uint32_t *)malloc(sizeof(uint32_t));
+    *conn_id.next_engine_send = 0;
+    *conn_id.next_engine_recv = 0;
+
+    // This is ugly, but it works.
+    std::lock_guard<std::mutex> lock(fd_map_mu_);
+    next_engine_ptr_map_[flow_id] = std::make_pair(conn_id.next_engine_send, conn_id.next_engine_recv);
 
     return conn_id;
 }
@@ -1838,11 +1853,19 @@ ConnID Endpoint::uccl_accept(int local_vdev, int *remote_vdev,
     {
         auto pdev = local_vdev * kBundleNIC + i;
         auto local_engine_idx = find_least_loaded_engine_idx_and_update_for_pdev(pdev, flow_id, is_sender);
-        
+
         install_flow_on_engine(flow_id, remote_ip, local_engine_idx, bootstrap_fd,
                             is_sender);
         conn_id.engine_idx[i] = local_engine_idx;
     }
+    conn_id.next_engine_send = (uint32_t *)malloc(sizeof(uint32_t));
+    conn_id.next_engine_recv = (uint32_t *)malloc(sizeof(uint32_t));
+    *conn_id.next_engine_send = 0;
+    *conn_id.next_engine_recv = 0;
+
+    // This is ugly, but it works.
+    std::lock_guard<std::mutex> lock(fd_map_mu_);
+    next_engine_ptr_map_[flow_id] = std::make_pair(conn_id.next_engine_send, conn_id.next_engine_recv);
 
     return conn_id;
 }
@@ -1873,12 +1896,12 @@ PollCtx *Endpoint::uccl_send_async(ConnID conn_id, const void *data,
                                    const int len, Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev = (conn_id.next_engine_send++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_engine_send)++) % kBundleNIC;
 
-    LOG(INFO) << "uccl_send_async: pdev " << pdev << " engine_idx " << conn_id.engine_idx[pdev];
+    LOG(INFO) << "uccl_send_async: pdev_offset " << pdev_offset << " engine_idx " << conn_id.engine_idx[pdev_offset];
 
     poll_ctx->num_unfinished = 1;
-    poll_ctx->engine_idx = conn_id.engine_idx[pdev];
+    poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];
 #ifdef POLLCTX_DEBUG
     poll_ctx->flow_id = conn_id.flow_id;
     poll_ctx->req_id = req_id++;
@@ -1890,7 +1913,7 @@ PollCtx *Endpoint::uccl_send_async(ConnID conn_id, const void *data,
         .len_p = nullptr,
         .data = const_cast<void *>(data),
         .mhandle = mhandle,
-        .pdev = pdev,
+        .pdev_offset = pdev_offset,
         .flow_id = conn_id.flow_id,
         .deser_msgs = nullptr,
         .poll_ctx = poll_ctx,
@@ -1904,10 +1927,10 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                                    Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev = (conn_id.next_engine_recv++) % kBundleNIC;
+    auto pdev_offset = (*conn_id.next_engine_recv++) % kBundleNIC;
 
     poll_ctx->num_unfinished = 1;
-    poll_ctx->engine_idx = conn_id.engine_idx[pdev];
+    poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];
 #ifdef POLLCTX_DEBUG
     poll_ctx->flow_id = conn_id.flow_id;
     poll_ctx->req_id = req_id++;
@@ -1919,7 +1942,7 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
         .len_p = len_p,
         .data = data,
         .mhandle = mhandle,
-        .pdev = pdev,
+        .pdev_offset = pdev_offset,
         .flow_id = conn_id.flow_id,
         .deser_msgs = nullptr,
         .poll_ctx = poll_ctx,
@@ -1928,15 +1951,15 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
     return poll_ctx;
 }
 PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
-                                             Mhandle *mhandle, uint32_t *pdev) {
+                                             Mhandle *mhandle, uint32_t *pdev_offset) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    *pdev = (conn_id.next_engine_recv++) % kBundleNIC;
+    *pdev_offset = ((*conn_id.next_engine_recv)++) % kBundleNIC;
 
-    LOG(INFO) << "uccl_recv_scattered_async: pdev " << *pdev << " engine_idx " << conn_id.engine_idx[*pdev];
+    LOG(INFO) << "uccl_recv_scattered_async: pdev " << *pdev_offset << " engine_idx " << conn_id.engine_idx[*pdev_offset];
 
     poll_ctx->num_unfinished = 1;
-    poll_ctx->engine_idx = conn_id.engine_idx[*pdev];
+    poll_ctx->engine_idx = conn_id.engine_idx[*pdev_offset];
 #ifdef POLLCTX_DEBUG
     poll_ctx->flow_id = conn_id.flow_id;
     poll_ctx->req_id = req_id++;
@@ -1948,7 +1971,7 @@ PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
         .len_p = &(req->recv_len[0]),
         .req = req,
         .mhandle = mhandle,
-        .pdev = *pdev,
+        .pdev_offset = *pdev_offset,
         .flow_id = conn_id.flow_id,
         .deser_msgs = nullptr,
         .poll_ctx = poll_ctx,
@@ -1958,7 +1981,7 @@ PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
 }
 
 void Endpoint::uccl_recv_free_ptrs(ConnID conn_id, int iov_n,
-                                   void **iov_addrs, int pdev) {
+                                   void **iov_addrs, uint32_t pdev_offset) {
     Channel::Msg msg = {
         .opcode = Channel::Msg::Op::kRxFreePtrs,
         .len = iov_n,
@@ -1970,15 +1993,15 @@ void Endpoint::uccl_recv_free_ptrs(ConnID conn_id, int iov_n,
         .poll_ctx = nullptr,
     };
 
-    Channel::enqueue_mp(channel_vec_[conn_id.engine_idx[pdev]]->rx_task_q_, &msg);
+    Channel::enqueue_mp(channel_vec_[conn_id.engine_idx[pdev_offset]]->rx_task_q_, &msg);
 }
 
 PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
                                          int *len_p, Mhandle **mhandle, int n) {
     PollCtx *poll_ctx = ctx_pool_->pop();
     poll_ctx->num_unfinished = n;
-    auto pdev = (conn_id.next_engine_recv++) % kBundleNIC;
-    poll_ctx->engine_idx = conn_id.engine_idx[pdev];
+    auto pdev_offset = (*conn_id.next_engine_recv++) % kBundleNIC;
+    poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];
 #ifdef POLLCTX_DEBUG
     poll_ctx->flow_id = conn_id.flow_id;
     poll_ctx->req_id = req_id++;

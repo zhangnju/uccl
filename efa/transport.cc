@@ -1771,8 +1771,12 @@ ConnID Endpoint::uccl_connect(int local_vdev, int remote_vdev,
     }
     conn_id.next_engine_send = (uint32_t *)malloc(sizeof(uint32_t));
     conn_id.next_engine_recv = (uint32_t *)malloc(sizeof(uint32_t));
-    *conn_id.next_engine_send = 0;
-    *conn_id.next_engine_recv = 0;
+    // We must adhere to the following rules:
+    // local next_engine_send = remote next_engine_recv
+    // local next_engine_recv = remote next_engine_send
+    // All are initialized to zero would cause all flows use the first pdev simultaneously.
+    *conn_id.next_engine_send = flow_id;
+    *conn_id.next_engine_recv = get_peer_flow_id(flow_id);
 
     // This is ugly, but it works.
     std::lock_guard<std::mutex> lock(fd_map_mu_);
@@ -1860,8 +1864,12 @@ ConnID Endpoint::uccl_accept(int local_vdev, int *remote_vdev,
     }
     conn_id.next_engine_send = (uint32_t *)malloc(sizeof(uint32_t));
     conn_id.next_engine_recv = (uint32_t *)malloc(sizeof(uint32_t));
-    *conn_id.next_engine_send = 0;
-    *conn_id.next_engine_recv = 0;
+    // We must adhere to the following rules:
+    // local next_engine_send = remote next_engine_recv
+    // local next_engine_recv = remote next_engine_send
+    // All are initialized to zero would cause all flows use the first pdev simultaneously.
+    *conn_id.next_engine_send = flow_id;
+    *conn_id.next_engine_recv = get_peer_flow_id(flow_id);
 
     // This is ugly, but it works.
     std::lock_guard<std::mutex> lock(fd_map_mu_);

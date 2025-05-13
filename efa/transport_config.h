@@ -14,6 +14,7 @@
 // #define POLLCTX_DEBUG
 
 // #define TEST_SINGLE_PDEV
+// #define CONN_SPLIT
 
 enum class SenderCCType {
     kNone,
@@ -37,7 +38,7 @@ static_assert(
 
 static const uint32_t kBundleNIC = 2;
 static const uint32_t kNumVdevices = 8;        // # of vEFA/GPUs.
-static const uint32_t kNumEnginesPerVdev = kBundleNIC * 2;  // # of engines per vEFA/GPU.
+static const uint32_t kNumEnginesPerVdev = kBundleNIC * 4;  // # of engines per vEFA/GPU.
 static const uint32_t kNumEngines = kNumVdevices * kNumEnginesPerVdev;
 static const bool kSplitSendRecvEngine =
     false;  // Split sender/recevier flows to dedicated engines.

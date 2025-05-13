@@ -46,8 +46,11 @@ typedef uint64_t FlowID;
 
 struct ConnID {
     FlowID flow_id;       // Used for UcclEngine to look up UcclFlow.
-    // uint32_t engine_idx;  // Used for Endpoint to locate the right engine.
+    #ifdef CONN_SPLIT
+    uint32_t engine_idx[kNumEnginesPerVdev];
+    #else
     uint32_t engine_idx[kBundleNIC];
+    #endif
     int boostrap_id;      // Used for bootstrap connection with the peer.
     uint32_t *next_pdev_offset_send;
     uint32_t *next_pdev_offset_recv;

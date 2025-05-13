@@ -664,7 +664,11 @@ void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
     auto *app_buf_cursor = tx_work.data;
     auto remaining_bytes = tx_work.len;
     // Use the MR of the corresponding pdev.
+    #ifdef CONN_SPLIT
+    auto *app_mr = tx_work.mhandle->mr[tx_work.pdev_offset / (kNumEnginesPerVdev / kBundleNIC)];
+    #else
     auto *app_mr = tx_work.mhandle->mr[tx_work.pdev_offset];
+    #endif
     auto *poll_ctx = tx_work.poll_ctx;
 
     while (remaining_bytes > 0 || tx_work.len == 0) {
@@ -1800,6 +1804,21 @@ ConnID Endpoint::uccl_connect(int local_vdev, int remote_vdev,
     conn_id.flow_id = flow_id;
     conn_id.boostrap_id = bootstrap_fd;
 
+    #ifdef CONN_SPLIT
+    int engine_off = 0;
+    for (int i = 0; i < kBundleNIC; i++) {
+        auto pdev = local_vdev * kBundleNIC + i;
+
+        // iterate over all engines on the pdev: [si, ei)
+        auto si = pdev * (kNumEnginesPerVdev / kBundleNIC);
+        auto ei = (pdev + 1) * (kNumEnginesPerVdev / kBundleNIC);
+
+        for (auto local_engine_idx = si; local_engine_idx < ei; local_engine_idx++) {
+            install_flow_on_engine(flow_id, remote_ip, local_engine_idx, bootstrap_fd, is_sender);
+            conn_id.engine_idx[engine_off++] = local_engine_idx;
+        }
+    }
+    #else
     // Install flows on all pdevs.
     for (int i = 0; i < kBundleNIC; i++)
     {
@@ -1810,6 +1829,7 @@ ConnID Endpoint::uccl_connect(int local_vdev, int remote_vdev,
                             is_sender);
         conn_id.engine_idx[i] = local_engine_idx;
     }
+    #endif
     conn_id.next_pdev_offset_send = (uint32_t *)malloc(sizeof(uint32_t));
     conn_id.next_pdev_offset_recv = (uint32_t *)malloc(sizeof(uint32_t));
     // We must adhere to the following rules:
@@ -1893,16 +1913,32 @@ ConnID Endpoint::uccl_accept(int local_vdev, int *remote_vdev,
     conn_id.flow_id = flow_id;
     conn_id.boostrap_id = bootstrap_fd;
 
-    // Install flows on all pdevs.
-    for (int i = 0; i < kBundleNIC; i++)
-    {
-        auto pdev = local_vdev * kBundleNIC + i;
-        auto local_engine_idx = find_least_loaded_engine_idx_and_update_for_pdev(pdev, flow_id, is_sender);
+    #ifdef CONN_SPLIT
+        int engine_off = 0;
+        for (int i = 0; i < kBundleNIC; i++) {
+            auto pdev = local_vdev * kBundleNIC + i;
 
-        install_flow_on_engine(flow_id, remote_ip, local_engine_idx, bootstrap_fd,
-                            is_sender);
-        conn_id.engine_idx[i] = local_engine_idx;
-    }
+            // iterate over all engines on the pdev: [si, ei)
+            auto si = pdev * (kNumEnginesPerVdev / kBundleNIC);
+            auto ei = (pdev + 1) * (kNumEnginesPerVdev / kBundleNIC);
+
+            for (auto local_engine_idx = si; local_engine_idx < ei; local_engine_idx++) {
+                install_flow_on_engine(flow_id, remote_ip, local_engine_idx, bootstrap_fd, is_sender);
+                conn_id.engine_idx[engine_off++] = local_engine_idx;
+            }
+        }
+    #else
+        // Install flows on all pdevs.
+        for (int i = 0; i < kBundleNIC; i++)
+        {
+            auto pdev = local_vdev * kBundleNIC + i;
+            auto local_engine_idx = find_least_loaded_engine_idx_and_update_for_pdev(pdev, flow_id, is_sender);
+
+            install_flow_on_engine(flow_id, remote_ip, local_engine_idx, bootstrap_fd,
+                                is_sender);
+            conn_id.engine_idx[i] = local_engine_idx;
+        }
+    #endif
     conn_id.next_pdev_offset_send = (uint32_t *)malloc(sizeof(uint32_t));
     conn_id.next_pdev_offset_recv = (uint32_t *)malloc(sizeof(uint32_t));
     // We must adhere to the following rules:
@@ -1945,7 +1981,11 @@ PollCtx *Endpoint::uccl_send_async(ConnID conn_id, const void *data,
                                    const int len, Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
+    #ifdef CONN_SPLIT
+    auto pdev_offset = ((*conn_id.next_pdev_offset_send)++ / kNMSGLB) % kNumEnginesPerVdev;
+    #else
     auto pdev_offset = ((*conn_id.next_pdev_offset_send)++ / kNMSGLB) % kBundleNIC;
+    #endif
 
     #ifdef TEST_SINGLE_PDEV
     pdev_offset = 0;
@@ -1980,7 +2020,11 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                                    Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
+    #ifdef CONN_SPLIT
+    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kNumEnginesPerVdev;
+    #else
     auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kBundleNIC;
+    #endif
 
     #ifdef TEST_SINGLE_PDEV
     pdev_offset = 0;
@@ -2011,7 +2055,11 @@ PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
                                              Mhandle *mhandle, uint32_t *pdev_offset) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
+    #ifdef CONN_SPLIT
+    *pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kNumEnginesPerVdev;
+    #else
     *pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kBundleNIC;
+    #endif
 
     #ifdef TEST_SINGLE_PDEV
     *pdev_offset = 0;
@@ -2061,7 +2109,12 @@ PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
                                          int *len_p, Mhandle **mhandle, int n) {
     PollCtx *poll_ctx = ctx_pool_->pop();
     poll_ctx->num_unfinished = n;
+
+    #ifdef CONN_SPLIT
+    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kNumEnginesPerVdev;
+    #else
     auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kBundleNIC;
+    #endif
 
     #ifdef TEST_SINGLE_PDEV
     pdev_offset = 0;

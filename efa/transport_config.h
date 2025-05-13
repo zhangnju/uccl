@@ -13,6 +13,8 @@
 // #define RTT_STATS
 // #define POLLCTX_DEBUG
 
+// #define TEST_SINGLE_PDEV
+
 enum class SenderCCType {
     kNone,
     kTimely,

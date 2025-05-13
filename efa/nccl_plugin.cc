@@ -555,15 +555,15 @@ ncclResult_t pluginTest(void *request, int *done, int *size) {
         *done = 1;
         if (req->type == ReqTx) {
             size[0] = req->send_len;
-            LOG(INFO) << "pluginTest ReqTx done: " << size[0];
+            VLOG(3) << "pluginTest ReqTx done: " << size[0];
         } else if (req->type == ReqRx) {
             for (int i = 0; i < req->n; i++) size[i] = req->recv_len[i];
-            LOG(INFO) << "pluginTest ReqRx done: " << size[0];
+            VLOG(3) << "pluginTest ReqRx done: " << size[0];
         } else if (req->type == ReqFlush) {
             // Do nothing.
         } else if (req->type == ReqRxScattered) {
             size[0] = req->recv_len[0];
-            LOG(INFO) << "pluginTest ReqRxScattered done: " << size[0];
+            VLOG(3) << "pluginTest ReqRxScattered done: " << size[0];
         }
         // request from ReqRxScattered will be freed by pluginIrecvFreePtrs
         if (req->type != ReqRxScattered) {

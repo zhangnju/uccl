@@ -1543,7 +1543,7 @@ Endpoint::Endpoint() : stats_thread_([this]() { stats_thread_fn(); }) {
     static std::once_flag flag_once;
     std::call_once(flag_once, []() { EFAFactory::Init(); });
 
-    CHECK_LE(kNumEngines, NUM_CPUS / 4)
+    CHECK_LE(kNumEngines, NUM_CPUS / 2)
         << "num_queues should be less than or equal to the number of CPUs "
            "/ 4";
 
@@ -1935,7 +1935,7 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                                    Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev_offset = (*conn_id.next_engine_recv++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_engine_recv)++) % kBundleNIC;
 
     poll_ctx->num_unfinished = 1;
     poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];
@@ -2008,7 +2008,7 @@ PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
                                          int *len_p, Mhandle **mhandle, int n) {
     PollCtx *poll_ctx = ctx_pool_->pop();
     poll_ctx->num_unfinished = n;
-    auto pdev_offset = (*conn_id.next_engine_recv++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_engine_recv)++) % kBundleNIC;
     poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];
 #ifdef POLLCTX_DEBUG
     poll_ctx->flow_id = conn_id.flow_id;

@@ -981,7 +981,7 @@ static inline uint32_t get_vdev_idx_by_engine_idx(uint32_t engine_idx) {
 }
 
 static inline uint32_t get_pdev_idx_by_engine_idx(uint32_t engine_idx) {
-    return engine_idx / kBundleNIC;
+    return engine_idx / (kNumEnginesPerVdev / kBundleNIC);
 }
 
 static inline uint32_t get_engine_off_by_engine_idx(uint32_t engine_idx) {

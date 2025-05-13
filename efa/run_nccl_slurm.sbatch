@@ -54,7 +54,7 @@ else
       NCCL_BUFFSIZE=1048576
 
       COPY_CHANNELS=8
-      CHANNELS_NET_PEER=1
+      CHANNELS_NET_PEER=4
 
 fi
 
@@ -84,7 +84,7 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x NCCL_GDRCOPY_SYNC_ENABLE=0 \
       -x NCCL_GDRCOPY_FIFO_ENABLE=0 \
       -x NCCL_PROTO=Simple \
-      -x NCCL_TOPO_FILE=/home/xzhiying/uccl_rdma/efa/p5en-48xl-topo.xml \
+      -x NCCL_TOPO_FILE=${ROOT_DIR}/efa/p5en-48xl-topo.xml \
       -x GLOG_logtostderr=0 \
       -x UCCL_ENGINE_QUIET=1 \
       ${NCCL_TESTS_PATH} \

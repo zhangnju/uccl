@@ -165,7 +165,7 @@ EFASocket *EFAFactory::CreateSocket(int gpu_idx, int pdev_idx, int socket_idx) {
 
 struct EFADevice *EFAFactory::GetEFADevice(int pdev_idx) {
     auto dev_iter = efa_ctl.dev_map.find(pdev_idx);
-    DCHECK(dev_iter != efa_ctl.dev_map.end());
+    DCHECK(dev_iter != efa_ctl.dev_map.end()) << "pdev_idx " << pdev_idx;
     auto *dev = dev_iter->second;
     return dev;
 }

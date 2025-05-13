@@ -35,7 +35,7 @@ static_assert(
 
 static const uint32_t kBundleNIC = 2;
 static const uint32_t kNumVdevices = 8;        // # of vEFA/GPUs.
-static const uint32_t kNumEnginesPerVdev = kBundleNIC * 2;  // # of engines per vEFA/GPU.
+static const uint32_t kNumEnginesPerVdev = kBundleNIC * 4;  // # of engines per vEFA/GPU.
 static const uint32_t kNumEngines = kNumVdevices * kNumEnginesPerVdev;
 static const bool kSplitSendRecvEngine =
     false;  // Split sender/recevier flows to dedicated engines.
@@ -118,7 +118,7 @@ static uint32_t NUM_CPUS = std::thread::hardware_concurrency();
 
 // NUMA node0 CPU(s):      0-47,96-143
 // NUMA node1 CPU(s):      48-95,144-191
-static const uint32_t ENGINE_CPU_START[2] = {NUM_CPUS / 2 + 16, NUM_CPUS / 4 + 16};
+static const uint32_t ENGINE_CPU_START[2] = {NUM_CPUS / 2, NUM_CPUS / 4};
 static const uint16_t BASE_PORT = 10000;
 static const uint64_t NUM_FRAMES = 65536 * 4;  // # of frames.
 static const uint32_t RECV_BATCH_SIZE = 32;
@@ -154,7 +154,7 @@ static const uint32_t kMaxPathCtrl = kMaxDstQPCtrl * kMaxSrcQPCtrl;
 // static_assert((kMaxSrcQP + kMaxSrcQPCtrl) * kNumEnginesPerVdev <= EFA_MAX_QPS);
 
 // CC parameters.
-static const double kMaxUnackedPktsPP = 1u;
+static const double kMaxUnackedPktsPP = 1.25;
 static const uint32_t kMaxUnackedPktsPerEngine = kMaxUnackedPktsPP * kMaxPath;
 static const std::size_t kSackBitmapSize = 1024;
 static const std::size_t kFastRexmitDupAckThres = 128;

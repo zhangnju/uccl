@@ -6,8 +6,8 @@
 
 #define PATH_SELECTION
 #define REXMIT_SET_PATH
-// #define USE_SRD
-// #define USE_SRD_FOR_CTRL
+#define USE_SRD
+#define USE_SRD_FOR_CTRL
 // #define EMULATE_RC_ZC
 #define SCATTERED_MEMCPY
 // #define RTT_STATS
@@ -108,9 +108,9 @@ static const uint32_t EFA_UD_ADDITION = 0;  // Auto-added by EFA during recv.
 static const uint32_t EFA_UD_ADDITION = 40;  // Auto-added by EFA during recv.
 #endif
 /// Interface configuration.
-static_assert(kNumEngines >= NUM_DEVICES * 2,
-              "kNumEngines must be at least twice of NUM_DEVICES, one for send "
-              "and one for receive to avoid deadlocks.");
+// static_assert(kNumEngines >= NUM_DEVICES * 2,
+//               "kNumEngines must be at least twice of NUM_DEVICES, one for send "
+//               "and one for receive to avoid deadlocks.");
 
 static uint32_t NUM_CPUS = std::thread::hardware_concurrency();
 // Using the middle 96 cores to avoid conflicting with nccl proxy service (that
@@ -129,6 +129,9 @@ static const uint32_t QKEY = 0x12345;
 static const uint32_t SQ_PSN = 0x12345;
 static const uint64_t MAX_FLOW_ID = 1000000;
 
+// Do load balancing every kNMSGLB messages.
+static const uint32_t kNMSGLB = 1;
+
 // libibverbs configuration.
 static const uint32_t kMaxSendWr = 1024;
 static const uint32_t kMaxRecvWr = 256;
@@ -144,8 +147,13 @@ static const uint32_t kMaxMultiRecv = 8;
 // Setting to 20 gives highest bimq perf (191 vs. 186G), but bad for NCCL.
 static const uint32_t kMaxDstQP = 16;  // # of paths/QPs for data per src qp.
 static const uint32_t kMaxSrcQP = 16;
+#ifdef USE_SRD_FOR_CTRL
+static const uint32_t kMaxDstQPCtrl = 4;  // # of paths/QPs for control.
+static const uint32_t kMaxSrcQPCtrl = 4;
+#else
 static const uint32_t kMaxDstQPCtrl = 16;  // # of paths/QPs for control.
 static const uint32_t kMaxSrcQPCtrl = 16;
+#endif
 static constexpr uint32_t kMaxSrcDstQP = std::max(kMaxSrcQP, kMaxDstQP);
 static constexpr uint32_t kMaxSrcDstQPCtrl =
     std::max(kMaxSrcQPCtrl, kMaxDstQPCtrl);
@@ -156,10 +164,14 @@ static const uint32_t kMaxPathCtrl = kMaxDstQPCtrl * kMaxSrcQPCtrl;
 // static_assert((kMaxSrcQP + kMaxSrcQPCtrl) * kNumEnginesPerVdev <= EFA_MAX_QPS);
 
 // CC parameters.
-static const double kMaxUnackedPktsPP = 1.25;
+static const double kMaxUnackedPktsPP = 4;
 static const uint32_t kMaxUnackedPktsPerEngine = kMaxUnackedPktsPP * kMaxPath;
 static const std::size_t kSackBitmapSize = 1024;
+#ifdef USE_SRD
+static const std::size_t kFastRexmitDupAckThres = 65536;
+#else
 static const std::size_t kFastRexmitDupAckThres = 128;
+#endif
 static const double kMaxBwPP = 5.0 * 1e9 / 8;
 static const uint32_t kSwitchPathThres = 1u;
 static const uint32_t kMaxPktsInTimingWheel = 1024;

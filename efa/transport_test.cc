@@ -27,7 +27,7 @@ DEFINE_string(clientip, "", "Client IP address the server tries to connect.");
 DEFINE_bool(verify, false, "Whether to check data correctness.");
 DEFINE_bool(rand, false, "Whether to use randomized data length.");
 DEFINE_string(
-    test, "basic",
+    test, "bimq",
     "Which test to run: basic, async, pingpong, mt (multi-thread), "
     "mc (multi-connection), mq (multi-queue), bimq (bi-directional mq), tput.");
 

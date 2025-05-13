@@ -742,6 +742,7 @@ void UcclFlow::process_rttprobe_rsp(uint64_t ts1, uint64_t ts2, uint64_t ts3,
 }
 
 bool UcclFlow::periodic_check() {
+    #ifndef USE_SRD
     // TODO(yang): send RST packet, indicating removal of the flow.
     if (pcb_.max_rto_rexmits_consectutive_reached()) {
         DCHECK(false) << "Max RTO retransmits reached";
@@ -758,6 +759,7 @@ bool UcclFlow::periodic_check() {
                 pcb_.add_to_rto_wheel(msgbuf, seqno);
         }
     }
+    #endif
 
     return true;
 }
@@ -1115,7 +1117,9 @@ uint32_t UcclFlow::transmit_pending_packets(uint32_t budget) {
         msgbuf->set_dest_qpn(remote_meta_->qpn_list[dst_qp_idx]);
         pending_tx_frames_.push_back(msgbuf);
 
+        #ifndef USE_SRD
         pcb_.add_to_rto_wheel(msgbuf, seqno);
+        #endif
     }
 
     // TX both data and ack frames.
@@ -1941,7 +1945,7 @@ PollCtx *Endpoint::uccl_send_async(ConnID conn_id, const void *data,
                                    const int len, Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev_offset = ((*conn_id.next_pdev_offset_send)++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_pdev_offset_send)++ / kNMSGLB) % kBundleNIC;
 
     #ifdef TEST_SINGLE_PDEV
     pdev_offset = 0;
@@ -1976,7 +1980,7 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                                    Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kBundleNIC;
 
     #ifdef TEST_SINGLE_PDEV
     pdev_offset = 0;
@@ -2007,7 +2011,7 @@ PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
                                              Mhandle *mhandle, uint32_t *pdev_offset) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    *pdev_offset = ((*conn_id.next_pdev_offset_recv)++) % kBundleNIC;
+    *pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kBundleNIC;
 
     #ifdef TEST_SINGLE_PDEV
     *pdev_offset = 0;
@@ -2057,7 +2061,7 @@ PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
                                          int *len_p, Mhandle **mhandle, int n) {
     PollCtx *poll_ctx = ctx_pool_->pop();
     poll_ctx->num_unfinished = n;
-    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kBundleNIC;
 
     #ifdef TEST_SINGLE_PDEV
     pdev_offset = 0;

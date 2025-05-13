@@ -339,7 +339,7 @@ class EFASocket {
     FrameDescBuffPool *frame_desc_pool_;
 
     // For fast CQ polling.
-    struct ibv_wc wc_[kMaxPollBatch];
+    struct ibv_wc wc_[kMaxPollBatch * 2];
 
     struct ibv_send_wr send_wr_vec_[kMaxChainedWr];
     struct ibv_sge send_sge_vec_[kMaxChainedWr][2];

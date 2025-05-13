@@ -124,17 +124,19 @@ int main(int argc, char* argv[]) {
 
         for (int i = 0; i < kNumVdevices; i++) {
             auto gpu_idx = i;
-            auto pdev_idx = get_dev_idx_by_gpu_idx(i);
-
             cudaSetDevice(gpu_idx);
-            auto* dev = EFAFactory::GetEFADevice(pdev_idx);
-
             cudaMalloc(&data[i], kTestMsgSize);
-            mh[i].mr[0] = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
-                                  IBV_ACCESS_LOCAL_WRITE);
             cudaMalloc(&data2[i], kTestMsgSize);
-            mh2[i].mr[0] = ibv_reg_mr(dev->pd, data2[i], kTestMsgSize,
-                                   IBV_ACCESS_LOCAL_WRITE);
+
+            for (int j = 0; j < kBundleNIC; j++) {
+                auto pdev_idx = get_dev_idx_by_gpu_idx_and_dev_off(i, j);
+                auto* dev = EFAFactory::GetEFADevice(pdev_idx);
+
+                mh[i].mr[j] = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
+                                    IBV_ACCESS_LOCAL_WRITE);
+                mh2[i].mr[j] = ibv_reg_mr(dev->pd, data2[i], kTestMsgSize,
+                                    IBV_ACCESS_LOCAL_WRITE);
+            }
         }
         cudaSetDevice(0);
 
@@ -426,17 +428,19 @@ int main(int argc, char* argv[]) {
 
         for (int i = 0; i < kNumVdevices; i++) {
             auto gpu_idx = i;
-            auto pdev_idx = get_dev_idx_by_gpu_idx(i);
-
             cudaSetDevice(gpu_idx);
-            auto* dev = EFAFactory::GetEFADevice(pdev_idx);
-
             cudaMalloc(&data[i], kTestMsgSize);
-            mh[i].mr[0] = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
-                                  IBV_ACCESS_LOCAL_WRITE);
             cudaMalloc(&data2[i], kTestMsgSize);
-            mh2[i].mr[0] = ibv_reg_mr(dev->pd, data2[i], kTestMsgSize,
-                                   IBV_ACCESS_LOCAL_WRITE);
+
+            for (int j = 0; j < kBundleNIC; j++) {
+                auto pdev_idx = get_dev_idx_by_gpu_idx_and_dev_off(i, j);
+                auto* dev = EFAFactory::GetEFADevice(pdev_idx);
+
+                mh[i].mr[j] = ibv_reg_mr(dev->pd, data[i], kTestMsgSize,
+                                    IBV_ACCESS_LOCAL_WRITE);
+                mh2[i].mr[j] = ibv_reg_mr(dev->pd, data2[i], kTestMsgSize,
+                                    IBV_ACCESS_LOCAL_WRITE);
+            }
         }
         cudaSetDevice(0);
 

@@ -254,44 +254,81 @@ void RXTracking::try_copy_msgbuf_to_appbuf(Channel::Msg *rx_work) {
             ready_msg->get_pkt_hdr_addr() + EFA_UD_ADDITION);
         auto payload_len = ucclh->frame_len.value() - kUcclPktHdrLen;
 
-        auto *req = rx_copy_work.req;
-        DCHECK(iov_n_ < kMaxIovs);
-        req->iov_addrs[iov_n_] = (void *)ready_msg->get_pkt_data_addr();
-        VLOG(3) << "gpu_idx " << socket_->gpu_idx() << " iov_addrs[" << iov_n_
-                << "]: " << std::hex << req->iov_addrs[iov_n_];
-        req->iov_lens[iov_n_] = (int)payload_len;
-        req->dst_offsets[iov_n_] = deser_msg_len_;
-        deser_msg_len_ += payload_len;
-        iov_n_++;
-        num_unconsumed_msgbufs_--;
+        switch (rx_copy_work.opcode) {
+            // This is only for transport_test
+            case Channel::Msg::Op::kRx: {
+                deser_msg_len_ += payload_len;
+                iov_n_++;
+                num_unconsumed_msgbufs_--;
 
-        if (ready_msg->is_last()) {
-            ready_msg->set_next(nullptr);
+                if (ready_msg->is_last()) {
+                    ready_msg->set_next(nullptr);
 
-            // Copy the complete message to the app buffer.
-            req->iov_n = iov_n_;
-            *rx_copy_work.len_p = deser_msg_len_;
+                    *rx_copy_work.len_p = deser_msg_len_;
 
-            auto *poll_ctx = rx_copy_work.poll_ctx;
-            // Wakeup app thread waiting on endpoint.
-            if (--(poll_ctx->num_unfinished) == 0) {
-                poll_ctx->write_barrier();
-                std::lock_guard<std::mutex> lock(poll_ctx->mu);
-                poll_ctx->done = true;
-                poll_ctx->cv.notify_one();
-                
-                #ifdef POLLCTX_DEBUG
-                LOG(INFO) << "Received a complete message engine_id: "
-                          << poll_ctx->engine_idx << " rx flow_id "
-                          << poll_ctx->flow_id << " req_id " << poll_ctx->req_id
-                          << " size " << deser_msg_len_ << " req ptr " << req << " req type " << req->type; 
-                #endif
+                    auto *poll_ctx = rx_copy_work.poll_ctx;
+                    // Wakeup app thread waiting on endpoint.
+                    if (--(poll_ctx->num_unfinished) == 0) {
+                        poll_ctx->write_barrier();
+                        std::lock_guard<std::mutex> lock(poll_ctx->mu);
+                        poll_ctx->done = true;
+                        poll_ctx->cv.notify_one();
+                    }
 
+                    app_buf_queue_.pop_front();
+                    deser_msg_len_ = 0;
+                    iov_n_ = 0;
+                }
+                // Emulate Zerocopy'ing the complete message to the app buffer.
+                socket_->push_pkt_data(ready_msg->get_pkt_data_addr());
+                break;
             }
+            case Channel::Msg::Op::kRxScattered: {
+                auto *req = rx_copy_work.req;
+                DCHECK(iov_n_ < kMaxIovs);
+                req->iov_addrs[iov_n_] = (void *)ready_msg->get_pkt_data_addr();
+                VLOG(3) << "gpu_idx " << socket_->gpu_idx() << " iov_addrs["
+                        << iov_n_ << "]: " << std::hex
+                        << req->iov_addrs[iov_n_];
+                req->iov_lens[iov_n_] = (int)payload_len;
+                req->dst_offsets[iov_n_] = deser_msg_len_;
+                deser_msg_len_ += payload_len;
+                iov_n_++;
+                num_unconsumed_msgbufs_--;
 
-            app_buf_queue_.pop_front();
-            deser_msg_len_ = 0;
-            iov_n_ = 0;
+                if (ready_msg->is_last()) {
+                    ready_msg->set_next(nullptr);
+
+                    // Copy the complete message to the app buffer.
+                    req->iov_n = iov_n_;
+                    *rx_copy_work.len_p = deser_msg_len_;
+
+                    auto *poll_ctx = rx_copy_work.poll_ctx;
+                    // Wakeup app thread waiting on endpoint.
+                    if (--(poll_ctx->num_unfinished) == 0) {
+                        poll_ctx->write_barrier();
+                        std::lock_guard<std::mutex> lock(poll_ctx->mu);
+                        poll_ctx->done = true;
+                        poll_ctx->cv.notify_one();
+
+#ifdef POLLCTX_DEBUG
+                        LOG(INFO)
+                            << "Received a complete message engine_id: "
+                            << poll_ctx->engine_idx << " rx flow_id "
+                            << poll_ctx->flow_id << " req_id "
+                            << poll_ctx->req_id << " size " << deser_msg_len_
+                            << " req ptr " << req << " req type " << req->type;
+#endif
+                    }
+
+                    app_buf_queue_.pop_front();
+                    deser_msg_len_ = 0;
+                    iov_n_ = 0;
+                }
+                break;
+            }
+            default:
+                LOG(FATAL) << "Unknown opcode: " << rx_copy_work.opcode;
         }
 
         // Header and frame desc are no longer needed.
@@ -2241,8 +2278,10 @@ void Endpoint::stats_thread_fn() {
         std::string s;
         s += "\n[Uccl Engine] ";
         for (auto &engine : engine_vec_) {
-            s += engine->status_to_string(cnt >= 2);
-            cnt++;
+            if (!engine->active_flows_map_.empty()) {
+                s += engine->status_to_string(cnt >= 2);
+                cnt++;
+            }
         }
         if (cnt < engine_vec_.size())
             s += Format("\n\t... %d more engines", engine_vec_.size() - cnt);

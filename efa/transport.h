@@ -985,12 +985,12 @@ static inline uint32_t get_pdev_idx_by_engine_idx(uint32_t engine_idx) {
 }
 
 static inline uint32_t get_engine_off_by_engine_idx(uint32_t engine_idx) {
-    return engine_idx % (kNumEnginesPerVdev * 2);
+    return engine_idx % kNumEnginesPerVdev;
 }
 
-static inline uint32_t get_dev_idx_by_gpu_idx(uint32_t gpu_idx) {
-    // Fixed on P4D.
-    return gpu_idx / 2;
+static inline uint32_t get_dev_idx_by_gpu_idx_and_dev_off(uint32_t gpu_idx, uint32_t dev_off) {
+    // Fixed on P5EN.
+    return gpu_idx * kBundleNIC + dev_off;
 }
 
 static inline int get_pdev(int vdev) { 

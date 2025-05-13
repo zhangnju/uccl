@@ -8,6 +8,9 @@
 #include <cuda_pipeline.h>
 #include <cassert>
 
+// Yang:
+#define SCATTERED_SG
+
 enum primsMode {
   primsModeDefault = 0,
   primsModePatRs = 1,
@@ -303,6 +306,7 @@ class Primitives<
       
       step += StepPerSlice;
 
+#ifdef SCATTERED_SG
       // Yang: only care recv-side step value.
       if (flags & (Recv*RoleWaitRecv)) { 
         // Yang: is this step for network transfer?
@@ -325,8 +329,10 @@ class Primitives<
         // uint64_t cpu_tail = loadStepValue(connStepPtr);
         // printf("[waitPeer %ld] step %ld cpu_tail %ld connStepCache %ld tail_ptr %p tid %d group %d\n", gpu_idx, step, cpu_tail, connStepCache, connStepPtr, tid, group);
       }
+#endif
     }
 
+#ifdef SCATTERED_SG
     if (Recv) {
       // Yang: cannot use subBarrier() as it would block the GPU threads.
       barrier();
@@ -361,6 +367,7 @@ class Primitives<
         }
       }
     }
+#endif
   }
 
   template<int Recv, int Send>
@@ -1129,6 +1136,7 @@ private:
         if (checkAbort(spins)) break;
       }
       
+#ifdef SCATTERED_SG
       // Yang
       if (last_copied_step != step) {
         if (tid < MAX_TIDS) {
@@ -1154,7 +1162,7 @@ private:
           printf("WARNING padReduce: tid %d exceeding MAX_TIDS (%d); considering increasing MAX_TIPS\n", tid, MAX_TIDS);
         }
       }
-
+#endif
       if (postRecv) step += StepPerSlice;
     }
     if (sendPow2 >= 0 && sendPow2 == index && (flags & RoleWaitSend)) {
@@ -1194,6 +1202,7 @@ private:
 
     int workSize = ncclShmem.aborted ? 0 : nelem;
 
+#ifdef SCATTERED_SG
     // Yang
     for (int t = 0; t < MAX_TIDS; t++) {
       if (ncclShmem.groups[group].is_net_transfer[t]) {
@@ -1225,6 +1234,7 @@ private:
       }
     }
     barrier();
+#endif
 
     reduceCopy<Unroll, RedOp, T, 0, 1, 2, 0, 1, 1, /*PreOpSrcs*/0>
       (tid, nthreads, ncclShmem.redOpArgs[0],  nullptr, /*postOp=*/false,
@@ -1260,6 +1270,7 @@ private:
         ncclShmem.groups[group].dsts[1] = ncclShmem.groups[group].srcs[0]; // Already done
       }
 
+#ifdef SCATTERED_SG
       // Yang
       if (last_copied_step != step + recvStepOffset) {
         if (tid < MAX_TIDS) {
@@ -1285,6 +1296,7 @@ private:
           printf("WARNING padCopy: tid %d exceeding MAX_TIDS (%d); considering increasing MAX_TIPS\n", tid, MAX_TIDS);
         }
       }
+#endif
 
       if (postRecv) step += StepPerSlice;
     }
@@ -1319,6 +1331,7 @@ private:
 
     int workSize = ncclShmem.aborted ? 0 : nelem;
 
+#ifdef SCATTERED_SG
     // Yang
     for (int t = 0; t < MAX_TIDS; t++) {
       if (ncclShmem.groups[group].is_net_transfer[t]) {
@@ -1350,7 +1363,8 @@ private:
       }
     }
     barrier();
-    
+#endif
+
     reduceCopy<Unroll, RedOp, T, 0, 1, 1, 0, 1, 2, /*PreOpSrcs*/0>
       (tid, nthreads, ncclShmem.redOpArgs[0],  nullptr, /*postOp=*/false,
        1, ncclShmem.groups[group].srcs, nDsts, dsts, workSize);

@@ -1769,18 +1769,18 @@ ConnID Endpoint::uccl_connect(int local_vdev, int remote_vdev,
                             is_sender);
         conn_id.engine_idx[i] = local_engine_idx;
     }
-    conn_id.next_engine_send = (uint32_t *)malloc(sizeof(uint32_t));
-    conn_id.next_engine_recv = (uint32_t *)malloc(sizeof(uint32_t));
+    conn_id.next_pdev_offset_send = (uint32_t *)malloc(sizeof(uint32_t));
+    conn_id.next_pdev_offset_recv = (uint32_t *)malloc(sizeof(uint32_t));
     // We must adhere to the following rules:
-    // local next_engine_send = remote next_engine_recv
-    // local next_engine_recv = remote next_engine_send
+    // local next_pdev_offset_send = remote next_pdev_offset_recv
+    // local next_pdev_offset_recv = remote next_pdev_offset_send
     // All are initialized to zero would cause all flows use the first pdev simultaneously.
-    *conn_id.next_engine_send = flow_id;
-    *conn_id.next_engine_recv = get_peer_flow_id(flow_id);
+    *conn_id.next_pdev_offset_send = flow_id;
+    *conn_id.next_pdev_offset_recv = get_peer_flow_id(flow_id);
 
     // This is ugly, but it works.
     std::lock_guard<std::mutex> lock(fd_map_mu_);
-    next_engine_ptr_map_[flow_id] = std::make_pair(conn_id.next_engine_send, conn_id.next_engine_recv);
+    next_engine_ptr_map_[flow_id] = std::make_pair(conn_id.next_pdev_offset_send, conn_id.next_pdev_offset_recv);
 
     return conn_id;
 }
@@ -1862,18 +1862,18 @@ ConnID Endpoint::uccl_accept(int local_vdev, int *remote_vdev,
                             is_sender);
         conn_id.engine_idx[i] = local_engine_idx;
     }
-    conn_id.next_engine_send = (uint32_t *)malloc(sizeof(uint32_t));
-    conn_id.next_engine_recv = (uint32_t *)malloc(sizeof(uint32_t));
+    conn_id.next_pdev_offset_send = (uint32_t *)malloc(sizeof(uint32_t));
+    conn_id.next_pdev_offset_recv = (uint32_t *)malloc(sizeof(uint32_t));
     // We must adhere to the following rules:
-    // local next_engine_send = remote next_engine_recv
-    // local next_engine_recv = remote next_engine_send
+    // local next_pdev_offset_send = remote next_pdev_offset_recv
+    // local next_pdev_offset_recv = remote next_pdev_offset_send
     // All are initialized to zero would cause all flows use the first pdev simultaneously.
-    *conn_id.next_engine_send = flow_id;
-    *conn_id.next_engine_recv = get_peer_flow_id(flow_id);
+    *conn_id.next_pdev_offset_send = flow_id;
+    *conn_id.next_pdev_offset_recv = get_peer_flow_id(flow_id);
 
     // This is ugly, but it works.
     std::lock_guard<std::mutex> lock(fd_map_mu_);
-    next_engine_ptr_map_[flow_id] = std::make_pair(conn_id.next_engine_send, conn_id.next_engine_recv);
+    next_engine_ptr_map_[flow_id] = std::make_pair(conn_id.next_pdev_offset_send, conn_id.next_pdev_offset_recv);
 
     return conn_id;
 }
@@ -1904,7 +1904,7 @@ PollCtx *Endpoint::uccl_send_async(ConnID conn_id, const void *data,
                                    const int len, Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev_offset = ((*conn_id.next_engine_send)++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_pdev_offset_send)++) % kBundleNIC;
 
     LOG(INFO) << "uccl_send_async: pdev_offset " << pdev_offset << " engine_idx " << conn_id.engine_idx[pdev_offset];
 
@@ -1935,7 +1935,7 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
                                    Mhandle *mhandle) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    auto pdev_offset = ((*conn_id.next_engine_recv)++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++) % kBundleNIC;
 
     poll_ctx->num_unfinished = 1;
     poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];
@@ -1962,7 +1962,7 @@ PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
                                              Mhandle *mhandle, uint32_t *pdev_offset) {
     PollCtx *poll_ctx = ctx_pool_->pop();
 
-    *pdev_offset = ((*conn_id.next_engine_recv)++) % kBundleNIC;
+    *pdev_offset = ((*conn_id.next_pdev_offset_recv)++) % kBundleNIC;
 
     LOG(INFO) << "uccl_recv_scattered_async: pdev_offset " << *pdev_offset << " engine_idx " << conn_id.engine_idx[*pdev_offset];
 
@@ -2008,7 +2008,7 @@ PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
                                          int *len_p, Mhandle **mhandle, int n) {
     PollCtx *poll_ctx = ctx_pool_->pop();
     poll_ctx->num_unfinished = n;
-    auto pdev_offset = ((*conn_id.next_engine_recv)++) % kBundleNIC;
+    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++) % kBundleNIC;
     poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];
 #ifdef POLLCTX_DEBUG
     poll_ctx->flow_id = conn_id.flow_id;

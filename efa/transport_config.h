@@ -35,7 +35,7 @@ static_assert(
 
 static const uint32_t kBundleNIC = 2;
 static const uint32_t kNumVdevices = 8;        // # of vEFA/GPUs.
-static const uint32_t kNumEnginesPerVdev = kBundleNIC * 4;  // # of engines per vEFA/GPU.
+static const uint32_t kNumEnginesPerVdev = kBundleNIC * 2;  // # of engines per vEFA/GPU.
 static const uint32_t kNumEngines = kNumVdevices * kNumEnginesPerVdev;
 static const bool kSplitSendRecvEngine =
     false;  // Split sender/recevier flows to dedicated engines.
@@ -140,10 +140,10 @@ static const uint32_t kMaxMultiRecv = 8;
 
 // Path configuration.
 // Setting to 20 gives highest bimq perf (191 vs. 186G), but bad for NCCL.
-static const uint32_t kMaxDstQP = 26;  // # of paths/QPs for data per src qp.
-static const uint32_t kMaxSrcQP = 10;
-static const uint32_t kMaxDstQPCtrl = 8;  // # of paths/QPs for control.
-static const uint32_t kMaxSrcQPCtrl = 8;
+static const uint32_t kMaxDstQP = 16;  // # of paths/QPs for data per src qp.
+static const uint32_t kMaxSrcQP = 16;
+static const uint32_t kMaxDstQPCtrl = 16;  // # of paths/QPs for control.
+static const uint32_t kMaxSrcQPCtrl = 16;
 static constexpr uint32_t kMaxSrcDstQP = std::max(kMaxSrcQP, kMaxDstQP);
 static constexpr uint32_t kMaxSrcDstQPCtrl =
     std::max(kMaxSrcQPCtrl, kMaxDstQPCtrl);

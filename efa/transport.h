@@ -49,8 +49,8 @@ struct ConnID {
     // uint32_t engine_idx;  // Used for Endpoint to locate the right engine.
     uint32_t engine_idx[kBundleNIC];
     int boostrap_id;      // Used for bootstrap connection with the peer.
-    uint32_t *next_engine_send;
-    uint32_t *next_engine_recv;
+    uint32_t *next_pdev_offset_send;
+    uint32_t *next_pdev_offset_recv;
 };
 
 struct Mhandle {

@@ -61,6 +61,7 @@ fi
 # alltoall_perf all_reduce_perf all_gather_perf
 NCCL_TESTS_PATH="${NCCL_TESTS_PATH}/alltoall_perf"
 # NCCL_TESTS_PATH="${NCCL_TESTS_PATH}/all_reduce_perf"
+# NCCL_TESTS_PATH="${NCCL_TESTS_PATH}/sendrecv_perf"
 
 export PATH=/opt/amazon/openmpi/bin:$PATH
 

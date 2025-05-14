@@ -626,6 +626,8 @@ void UcclFlow::rx_messages() {
     }
     pending_rx_msgbufs_.clear();
 
+    // SRD does not need acking.
+    #if !defined(USE_SRD) || defined(SRD_USE_ACK)
     // Send one ack for a bunch of received packets.
     if (num_data_frames_recvd) {
         // To avoid receiver-side buffer empty.
@@ -651,6 +653,7 @@ void UcclFlow::rx_messages() {
             socket_->post_send_wr(ack_frame, src_qp_idx);
         }
     }
+    #endif
 
     deserialize_and_append_to_txtracking();
     transmit_pending_packets_drr(true);
@@ -670,6 +673,11 @@ void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
     auto *app_mr = tx_work.mhandle->mr[tx_work.pdev_offset];
     #endif
     auto *poll_ctx = tx_work.poll_ctx;
+
+    #if defined(USE_SRD) && !defined(SRD_USE_ACK)
+        poll_ctx->nr_tx_signals_ = 0;
+        poll_ctx->flow_id = flow_id_;
+    #endif
 
     while (remaining_bytes > 0 || tx_work.len == 0) {
         auto payload_len = std::min(remaining_bytes, (int)kUcclPktDataMaxLen);
@@ -697,6 +705,10 @@ void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
             deser_msgs_tail = msgbuf;
         }
 
+        #if defined(USE_SRD) && !defined(SRD_USE_ACK)
+            poll_ctx->nr_tx_signals_++;
+        #endif
+        
         if (tx_work.len == 0) break;
     }
     deser_msgs_head->mark_first();
@@ -1421,7 +1433,11 @@ void UcclEngine::run() {
             flow->transmit_pending_packets_drr(false);
         }
 
-        socket_->poll_send_cq();
+        frames = socket_->poll_send_cq();
+
+        #if defined(USE_SRD) && !defined(SRD_USE_ACK)
+            srd_ack_tx_signals(frames);
+        #endif
     }
 
     // This will reset flow pcb state.
@@ -1432,6 +1448,35 @@ void UcclEngine::run() {
     // This will flush all unpolled tx frames.
     socket_->shutdown();
 }
+
+#if defined(USE_SRD) && !defined(SRD_USE_ACK)
+void UcclEngine::srd_ack_tx_signals(std::vector<FrameDesc *> &frames) {
+
+    for (auto frame : frames) {
+        auto *poll_ctx = (PollCtx *)frame->get_poll_ctx();
+        auto flow_id = poll_ctx->flow_id;
+        auto it = active_flows_map_.find(flow_id);
+        DCHECK(it != active_flows_map_.end());
+        auto *flow = it->second;
+        if (--poll_ctx->nr_tx_signals_ == 0) {
+            std::lock_guard<std::mutex> lock(poll_ctx->mu);
+            poll_ctx->done = true;
+            poll_ctx->cv.notify_one();
+        }
+
+        // Free transmitted frames that are acked.
+        socket_->push_pkt_hdr(frame->get_pkt_hdr_addr());
+        // The pkt_data directly from the app buffer, thus no need to free.
+        socket_->push_frame_desc((uint64_t)frame);
+
+        flow->tx_tracking_.num_unacked_msgbufs_--;
+        flow->tx_tracking_.num_tracked_msgbufs_--;
+
+        // FIXME
+        flow->increase_rwnd();
+    }
+}
+#endif
 
 void UcclEngine::process_rx_msg(std::vector<FrameDesc *> &pkt_msgs) {
     for (auto &msgbuf : pkt_msgs) {
@@ -1988,7 +2033,11 @@ PollCtx *Endpoint::uccl_send_async(ConnID conn_id, const void *data,
     #endif
 
     #ifdef TEST_SINGLE_PDEV
-    pdev_offset = 0;
+    #ifdef CONN_SPLIT
+        pdev_offset = (*conn_id.next_pdev_offset_send) % kBundleNIC;
+    #else
+        pdev_offset = 0;
+    #endif
     #endif
 
     VLOG(3) << "uccl_send_async: pdev_offset " << pdev_offset << " engine_idx " << conn_id.engine_idx[pdev_offset];
@@ -2027,7 +2076,11 @@ PollCtx *Endpoint::uccl_recv_async(ConnID conn_id, void *data, int *len_p,
     #endif
 
     #ifdef TEST_SINGLE_PDEV
-    pdev_offset = 0;
+    #ifdef CONN_SPLIT
+        pdev_offset = (*conn_id.next_pdev_offset_recv) % kBundleNIC;
+    #else
+        pdev_offset = 0;
+    #endif
     #endif
 
     poll_ctx->num_unfinished = 1;
@@ -2062,7 +2115,11 @@ PollCtx *Endpoint::uccl_recv_scattered_async(ConnID conn_id, UcclRequest *req,
     #endif
 
     #ifdef TEST_SINGLE_PDEV
-    *pdev_offset = 0;
+    #ifdef CONN_SPLIT
+        *pdev_offset = (*conn_id.next_pdev_offset_recv) % kBundleNIC;
+    #else
+        *pdev_offset = 0;
+    #endif
     #endif
 
     VLOG(3) << "uccl_recv_scattered_async: pdev_offset " << *pdev_offset << " engine_idx " << conn_id.engine_idx[*pdev_offset];
@@ -2117,7 +2174,11 @@ PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
     #endif
 
     #ifdef TEST_SINGLE_PDEV
-    pdev_offset = 0;
+    #ifdef CONN_SPLIT
+        pdev_offset = (*conn_id.next_pdev_offset_recv) % kBundleNIC;
+    #else
+        pdev_offset = 0;
+    #endif
     #endif
 
     poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];

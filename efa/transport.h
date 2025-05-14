@@ -72,6 +72,12 @@ struct alignas(64) PollCtx {
     FlowID flow_id;   // Flow ID for request issuing.
     uint64_t req_id;  // Tx ID for request issuing.
 #endif
+
+#if defined(USE_SRD) && !defined(SRD_USE_ACK)
+    FlowID flow_id;
+    uint32_t nr_tx_signals_;
+#endif
+
     PollCtx() : fence(false), done(false), num_unfinished(0), timestamp(0) {};
     ~PollCtx() { clear(); }
 
@@ -542,6 +548,8 @@ class UcclFlow {
 
     inline swift::Pcb *get_pcb() { return &pcb_; }
 
+    inline void increase_rwnd() { last_received_rwnd_++; }
+
    private:
     void process_ack(const UcclPktHdr *ucclh);
 
@@ -790,6 +798,8 @@ class UcclEngine {
      * @param pkt_msgs Pointer to a list of packets.
      */
     void process_rx_msg(std::vector<FrameDesc *> &pkt_msgs);
+
+    void srd_ack_tx_signals(std::vector<FrameDesc *> &frames);
 
     /**
      * @brief Iterate throught the list of flows, check and handle RTOs.

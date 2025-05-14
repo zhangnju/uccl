@@ -6,8 +6,11 @@
 
 #define PATH_SELECTION
 #define REXMIT_SET_PATH
+
 #define USE_SRD
 #define USE_SRD_FOR_CTRL
+// #define SRD_USE_ACK
+
 // #define EMULATE_RC_ZC
 #define SCATTERED_MEMCPY
 // #define RTT_STATS
@@ -146,11 +149,25 @@ static const uint32_t kMaxMultiRecv = 8;
 
 // Path configuration.
 // Setting to 20 gives highest bimq perf (191 vs. 186G), but bad for NCCL.
+
+#if defined(USE_SRD) && !defined(SRD_USE_ACK)
+static const uint32_t kMaxDstQP = 24;  // # of paths/QPs for data per src qp.
+static const uint32_t kMaxSrcQP = 24;
+#else
 static const uint32_t kMaxDstQP = 16;  // # of paths/QPs for data per src qp.
 static const uint32_t kMaxSrcQP = 16;
+#endif
+
 #ifdef USE_SRD_FOR_CTRL
-static const uint32_t kMaxDstQPCtrl = 4;  // # of paths/QPs for control.
-static const uint32_t kMaxSrcQPCtrl = 4;
+
+#if defined(USE_SRD) && !defined(SRD_USE_ACK)
+static const uint32_t kMaxDstQPCtrl = 1;  // # of paths/QPs for control.
+static const uint32_t kMaxSrcQPCtrl = 1;
+#else
+static const uint32_t kMaxDstQPCtrl = 16;  // # of paths/QPs for control.
+static const uint32_t kMaxSrcQPCtrl = 16;
+#endif
+
 #else
 static const uint32_t kMaxDstQPCtrl = 16;  // # of paths/QPs for control.
 static const uint32_t kMaxSrcQPCtrl = 16;

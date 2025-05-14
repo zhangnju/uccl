@@ -381,7 +381,7 @@ class EFASocket {
 
     // This polls send_cq_ for data qps; wr_id is FrameDesc*.
     std::vector<FrameDesc *> poll_send_cq(uint32_t bugget); // only for test
-    void poll_send_cq();
+    std::vector<FrameDesc *> poll_send_cq();
 
     // This polls recv_cq_ for data qps; wr_id is FrameDesc*.
     std::vector<FrameDesc *> poll_recv_cq(uint32_t budget);

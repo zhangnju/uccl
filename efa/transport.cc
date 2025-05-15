@@ -659,7 +659,17 @@ void UcclFlow::rx_messages() {
     transmit_pending_packets_drr(true);
 }
 
-void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
+bool UcclFlow::check_fifo_ready(struct remote_rdma_info *r_info) {
+    return true;
+}
+
+bool UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
+
+    struct remote_rdma_info r_info;
+
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        if (!check_fifo_ready(&r_info)) return false;
+    #endif
 
     // deser tx_work into a FrameDesc chain, then pass to deser_th.
     FrameDesc *deser_msgs_head = nullptr;
@@ -690,6 +700,12 @@ void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
                                          (uint64_t)app_buf_cursor, payload_len,
                                          app_mr->lkey, 0);
         msgbuf->set_poll_ctx(poll_ctx);
+
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        msgbuf->set_remote_addr(r_info.remote_addr);
+        msgbuf->set_remote_rkey(r_info.remote_rkey);
+        r_info.remote_addr += payload_len;
+        #endif
 
         // auto pkt_payload_addr = msgbuf->get_pkt_addr() + kUcclPktHdrLen;
         // memcpy(pkt_payload_addr, app_buf_cursor, payload_len);
@@ -722,6 +738,7 @@ void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
 
     deserialize_and_append_to_txtracking();
     transmit_pending_packets_drr(false);
+    return true;
 }
 
 void UcclFlow::process_rttprobe_rsp(uint64_t ts1, uint64_t ts2, uint64_t ts3,
@@ -1131,6 +1148,16 @@ uint32_t UcclFlow::transmit_pending_packets(uint32_t budget) {
         msgbuf->set_src_qp_idx(UINT16_MAX);
         msgbuf->set_dest_ah(remote_ah_);
         msgbuf->set_dest_qpn(remote_meta_->qpn_list[dst_qp_idx]);
+
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        auto ctrl_hdr = IMMData(0);
+        // check peer_flow_id_'s higher 42bits are all zero.
+        DCHECK((peer_flow_id_ >> 42) == 0);
+        ctrl_hdr.SetFlowID(peer_flow_id_);
+        ctrl_hdr.SetSeq(seqno);
+        msgbuf->set_imm_data(ctrl_hdr.GetImmData());
+        #endif
+
         pending_tx_frames_.push_back(msgbuf);
 
         #ifndef USE_SRD
@@ -1300,95 +1327,6 @@ FrameDesc *UcclFlow::craft_ackpacket(uint32_t path_id, uint32_t seqno,
     return msgbuf;
 }
 
-void UcclEngine::sender_only_run() {
-    Channel::Msg rx_work;
-    Channel::Msg tx_work;
-
-    while (!shutdown_) {
-        // Calculate the cycles elapsed since last periodic processing.
-        auto now_tsc = rdtsc();
-        const auto elapsed_tsc = now_tsc - last_periodic_tsc_;
-
-        if (elapsed_tsc >= kSlowTimerIntervalTsc_) {
-            // Perform periodic processing.
-            periodic_process();
-            last_periodic_tsc_ = now_tsc;
-        }
-        
-        auto [frames, polled_send_acks] =
-            socket_->poll_ctrl_cq(RECV_BATCH_SIZE);
-
-        if (frames.size()) {
-            process_rx_msg(frames);
-        }
-
-        while (Channel::dequeue_sc(channel_->tx_task_q_, &tx_work)) {
-            // Make data written by the app thread visible to the engine.
-            tx_work.poll_ctx->read_barrier();
-            active_flows_map_[tx_work.flow_id]->tx_prepare_messages(tx_work);
-        }
-
-        for (auto &[flow_id, flow] : active_flows_map_) {
-            flow->deserialize_and_append_to_txtracking();
-
-            flow->transmit_pending_packets_drr(false);
-        }
-
-        socket_->poll_send_cq();
-    }
-
-    // This will reset flow pcb state.
-    for (auto [flow_id, flow] : active_flows_map_) {
-        flow->shutdown();
-        delete flow;
-    }
-    // This will flush all unpolled tx frames.
-    socket_->shutdown();
-}
-
-void UcclEngine::receiver_only_run() {
-    Channel::Msg rx_work;
-    Channel::Msg tx_work;
-
-    while (!shutdown_) {
-        // Calculate the cycles elapsed since last periodic processing.
-        auto now_tsc = rdtsc();
-        const auto elapsed_tsc = now_tsc - last_periodic_tsc_;
-
-        if (elapsed_tsc >= kSlowTimerIntervalTsc_) {
-            // Perform periodic processing.
-            periodic_process();
-            last_periodic_tsc_ = now_tsc;
-        }
-
-        while (Channel::dequeue_sc(channel_->rx_task_q_, &rx_work)) {
-            active_flows_map_[rx_work.flow_id]->rx_supply_app_buf(rx_work);
-        }
-
-        auto frames = socket_->poll_recv_cq(RECV_BATCH_SIZE);
-        auto [_frames, polled_send_acks] =
-            socket_->poll_ctrl_cq(RECV_BATCH_SIZE);
-        frames.insert(frames.end(), _frames.begin(), _frames.end());
-
-        if (frames.size()) {
-            process_rx_msg(frames);
-        }
-
-        for (auto &[flow_id, flow] : active_flows_map_) {
-            // Driving the rx buffer matching to incoming packets.
-            flow->rx_tracking_.try_copy_msgbuf_to_appbuf(nullptr);
-        }
-    }
-
-    // This will reset flow pcb state.
-    for (auto [flow_id, flow] : active_flows_map_) {
-        flow->shutdown();
-        delete flow;
-    }
-    // This will flush all unpolled tx frames.
-    socket_->shutdown();
-}
-
 void UcclEngine::run() {
     Channel::Msg rx_work;
     Channel::Msg tx_work;
@@ -1416,13 +1354,29 @@ void UcclEngine::run() {
 
         if (frames.size()) {
             // printf("recv with pdev: %d on engine %d\n", socket_->pdev_idx(), local_engine_idx_);
-            process_rx_msg(frames);
+            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+                process_rx_msg_srd_rdma_write(frames);
+            #else
+                process_rx_msg(frames);
+            #endif
         }
 
         while (Channel::dequeue_sc(channel_->tx_task_q_, &tx_work)) {
             // Make data written by the app thread visible to the engine.
             tx_work.poll_ctx->read_barrier();
-            active_flows_map_[tx_work.flow_id]->tx_prepare_messages(tx_work);
+            if (!active_flows_map_[tx_work.flow_id]->tx_prepare_messages(tx_work)) {
+                pending_tx_works_.push_back(tx_work);
+            }
+        }
+
+        // Handle pending tx works.
+        auto nr_pending_tx_works = pending_tx_works_.size();
+        for (int i = 0; i < nr_pending_tx_works; i++) {
+            auto &tx_work = pending_tx_works_.front();
+            pending_tx_works_.pop_front();
+            if (!active_flows_map_[tx_work.flow_id]->tx_prepare_messages(tx_work)) {
+                pending_tx_works_.push_back(tx_work);
+            }
         }
 
         for (auto &[flow_id, flow] : active_flows_map_) {
@@ -1477,6 +1431,33 @@ void UcclEngine::srd_ack_tx_signals(std::vector<FrameDesc *> &frames) {
     }
 }
 #endif
+
+void UcclFlow::rx_messages_srd_rdma_write()
+{
+    for (auto *msgbuf : pending_rx_msgbufs_) {
+        auto ctrl_hdr = IMMData(msgbuf->get_imm_data());
+        auto byte_len = msgbuf->get_pkt_data_len();
+        auto seqno = ctrl_hdr.GetSeq();
+    }
+}
+
+void UcclEngine::process_rx_msg_srd_rdma_write(std::vector<FrameDesc *> &pkt_msgs)
+{
+    for (auto &msgbuf : pkt_msgs) {
+        auto ctrl_hdr = IMMData(msgbuf->get_imm_data());
+
+        auto flow_id = ctrl_hdr.GetFlowID();
+
+        auto it = active_flows_map_.find(flow_id);
+        DCHECK(it != active_flows_map_.end());
+
+        it->second->pending_rx_msgbufs_.push_back(msgbuf);
+    }
+
+    for (auto &[flow_id, flow] : active_flows_map_) {
+        flow->rx_messages_srd_rdma_write();
+    }
+}
 
 void UcclEngine::process_rx_msg(std::vector<FrameDesc *> &pkt_msgs) {
     for (auto &msgbuf : pkt_msgs) {
@@ -1680,13 +1661,7 @@ Endpoint::Endpoint() : stats_thread_([this]() { stats_thread_fn(); }) {
                 auto *engine_ptr = engine.get();
                 engine_promise.set_value(std::move(engine));
 
-                if constexpr (kSplitSendRecvEngine) {
-                    if (i%2 == 0)
-                        engine_ptr->sender_only_run();
-                    else
-                        engine_ptr->receiver_only_run();
-                } else
-                    engine_ptr->run();
+                engine_ptr->run();
             }));
     }
     std::vector<UcclEngine *> engines;

@@ -60,6 +60,49 @@ struct Mhandle {
     struct ibv_mr *mr[kBundleNIC];
 };
 
+struct remote_rdma_info {
+    uint64_t remote_addr;
+    uint32_t remote_rkey;
+};
+
+class IMMData {
+public:
+    // High-------------------32bit----------------------Low
+    //  |                FLOWID                |    SEQ   |
+    //                   22bit                     10bit
+    constexpr static int kSEQ = 0;
+    constexpr static int kFLOWID = 10;
+    constexpr static int kSEQ_BITS = kFLOWID;
+    constexpr static int kFLOWID_BITS = 32 - kSEQ_BITS;
+    constexpr static uint32_t kFLOWID_MASK = (1 << kFLOWID_BITS) - 1;
+    constexpr static uint32_t kSEQ_MASK = (1 << kSEQ_BITS) - 1;
+
+    IMMData(uint32_t imm_data): imm_data_(imm_data) {}
+
+    inline uint32_t GetFlowID() const {
+        return imm_data_ >> kFLOWID & kFLOWID_MASK;
+    }
+
+    inline uint32_t GetSeq() const {
+        return imm_data_ >> kSEQ & kSEQ_MASK;
+    }
+
+    inline void SetFlowID(uint32_t flow_id) {
+        imm_data_ |= (flow_id & kFLOWID_MASK) << kFLOWID;
+    }
+
+    inline void SetSeq(uint32_t seq) {
+        imm_data_ |= (seq & kSEQ_MASK) << kSEQ;
+    }
+
+    inline uint32_t GetImmData() const {
+        return imm_data_;
+    }
+
+private:
+    uint32_t imm_data_;
+};
+
 struct alignas(64) PollCtx {
     std::mutex mu;
     std::condition_variable cv;
@@ -174,7 +217,6 @@ class Channel {
         FrameDesc *deser_msgs;
         // Wakeup handler
         PollCtx *poll_ctx;
-        uint64_t reserved;
     };
     const static uint32_t kMsgSize = sizeof(Msg);
     static_assert(kMsgSize % 4 == 0, "Msg must be 32-bit aligned");
@@ -514,6 +556,8 @@ class UcclFlow {
      */
     void rx_messages();
 
+    void rx_messages_srd_rdma_write();
+
     inline void rx_supply_app_buf(Channel::Msg &rx_work) {
         rx_tracking_.try_copy_msgbuf_to_appbuf(&rx_work);
     }
@@ -527,7 +571,9 @@ class UcclFlow {
      * @param msg Pointer to the first message buffer on a train of buffers,
      * aggregating to a partial or a full Message.
      */
-    void tx_prepare_messages(Channel::Msg &tx_deser_work);
+    bool tx_prepare_messages(Channel::Msg &tx_deser_work);
+
+    bool check_fifo_ready(struct remote_rdma_info *r_info);
 
     void process_rttprobe_rsp(uint64_t ts1, uint64_t ts2, uint64_t ts3,
                               uint64_t ts4, uint32_t path_id);
@@ -773,10 +819,6 @@ class UcclEngine {
      */
     void run();
 
-    void sender_only_run();
-
-    void receiver_only_run();
-
     /**
      * @brief Method to perform periodic processing. This is called by the
      * main engine cycle (see method `Run`).
@@ -799,6 +841,8 @@ class UcclEngine {
      */
     void process_rx_msg(std::vector<FrameDesc *> &pkt_msgs);
 
+    void process_rx_msg_srd_rdma_write(std::vector<FrameDesc *> &frames);
+
     void srd_ack_tx_signals(std::vector<FrameDesc *> &frames);
 
     /**
@@ -819,6 +863,9 @@ class UcclEngine {
     uint32_t local_engine_idx_;
     // AFXDP socket used for send/recv packets.
     EFASocket *socket_;
+
+    // Pending tx works due to receiver is not ready to receive.
+    std::deque<Channel::Msg> pending_tx_works_;
 
     // UcclFlow map
     std::unordered_map<FlowID, UcclFlow *> active_flows_map_;
@@ -847,7 +894,7 @@ class UcclEngine {
  * its all queues.
  */
 class Endpoint {
-    constexpr static uint16_t kBootstrapPort = 30000;
+    constexpr static uint16_t kBootstrapPort = 5000;
     constexpr static uint32_t kStatsTimerIntervalSec = 2;
 
     Channel *channel_vec_[kNumEngines];

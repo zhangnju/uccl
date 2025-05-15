@@ -238,8 +238,13 @@ EFASocket::EFASocket(int gpu_idx, int pdev_idx, int socket_idx)
     DCHECK(send_cq_ && recv_cq_) << "Failed to allocate send/recv_cq_";
 
     auto create_qp_func = &EFASocket::create_qp;
+
 #ifdef USE_SRD
+    #ifdef SRD_RDMA_WRITE
+    create_qp_func = &EFASocket::create_srd_qp_ex;
+    #else
     create_qp_func = &EFASocket::create_srd_qp;
+    #endif
 #endif
 
     // Create send/recv QPs.
@@ -311,6 +316,48 @@ struct ibv_qp *EFASocket::create_qp(struct ibv_cq *send_cq,
     attr.sq_psn = SQ_PSN;  // Set initial Send Queue PSN
     if (ibv_modify_qp(qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
         perror("Failed to modify QP to RTS");
+        exit(1);
+    }
+
+    return qp;
+}
+
+/// @ref efa_qp_create(), efa_base_ep_construct_ibv_qp_init_attr_ex()
+struct ibv_qp *EFASocket::create_srd_qp_ex(struct ibv_cq *send_cq,
+                                        struct ibv_cq *recv_cq,
+                                        uint32_t send_cq_size,
+                                        uint32_t recv_cq_size)
+{
+    struct ibv_qp_init_attr_ex qp_attr_ex = {};
+    struct efadv_qp_init_attr efa_attr = {};
+    
+    efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
+    
+    qp_attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+
+    qp_attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
+
+    qp_attr_ex.cap.max_send_wr = send_cq_size;
+    qp_attr_ex.cap.max_recv_wr = recv_cq_size; 
+    qp_attr_ex.cap.max_send_sge = 1;
+    qp_attr_ex.cap.max_recv_sge = 1;
+
+	qp_attr_ex.cap.max_inline_data = 0;
+	qp_attr_ex.pd = pd_;
+	qp_attr_ex.qp_context = context_;
+	qp_attr_ex.sq_sig_all = 1;
+
+	qp_attr_ex.send_cq = send_cq;
+	qp_attr_ex.recv_cq = recv_cq;
+
+    qp_attr_ex.qp_type = IBV_QPT_DRIVER;
+
+    struct ibv_qp *qp = efadv_create_qp_ex(
+			context_, &qp_attr_ex, &efa_attr,
+			sizeof(struct efadv_qp_init_attr));
+
+    if (!qp) {
+        perror("Failed to create QP");
         exit(1);
     }
 
@@ -420,6 +467,54 @@ uint32_t EFASocket::post_send_wr(FrameDesc *frame, uint16_t src_qp_idx) {
     out_bytes_ += frame->get_pkt_hdr_len() + frame->get_pkt_data_len();
 
     return 1;
+}
+
+uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
+                                        uint16_t src_qp_idx) {
+    struct ibv_sge sge[kMaxChainedWr];
+
+    auto *qp = qp_list_[src_qp_idx];
+    auto *qpx = ibv_qp_to_qp_ex(qp);
+
+    int i = 0;
+    ibv_wr_start(qpx);
+
+    for (auto *frame : frames) {
+        
+        auto dest_ah = frame->get_dest_ah();
+        auto dest_qpn = frame->get_dest_qpn();
+
+        DCHECK(frame->get_src_qp_idx() == UINT16_MAX);
+        frame->set_src_qp_idx(src_qp_idx);
+
+        ibv_wr_rdma_write_imm(qpx, frame->get_remote_rkey(), frame->get_remote_addr(), htobe32(frame->get_imm_data()));
+
+        sge[i] = {frame->get_pkt_data_addr(), frame->get_pkt_data_len(),
+                  frame->get_pkt_data_lkey_tx()};
+
+        ibv_wr_set_sge_list(qpx, 1, &sge[i]);
+
+        ibv_wr_set_ud_addr(qpx, frame->get_dest_ah(), frame->get_dest_qpn(), QKEY);
+
+        if (i == kMaxChainedWr) {
+            ibv_wr_complete(qpx);    
+            i = 0;
+            ibv_wr_start(qpx);
+        }
+
+        send_queue_wrs_++;
+        send_queue_wrs_per_qp_[src_qp_idx]++;
+        i++;
+        
+        out_packets_++;
+        out_bytes_ += frame->get_pkt_data_len();
+    }
+
+    if (i) {
+        ibv_wr_complete(qpx);
+    }
+
+    return frames.size();
 }
 
 uint32_t EFASocket::post_send_wrs(std::vector<FrameDesc *> &frames,
@@ -726,10 +821,20 @@ std::vector<FrameDesc *> EFASocket::poll_recv_cq(uint32_t budget) {
                 << "poll_recv_cq: completion error: "
                 << ibv_wc_status_str(wc_[i].status);
 
+            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+            DCHECK(wc_[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM);
+            #else
             DCHECK(wc_[i].opcode == IBV_WC_RECV);
+            #endif
 
             auto *frame = (FrameDesc *)wc_[i].wr_id;
             frame->set_cpe_time_tsc(now);
+
+            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+            frame->set_imm_data(be32toh(wc_[i].imm_data));
+            frame->set_pkt_data_len(wc_[i].byte_len);
+            #endif
+
             frames.push_back(frame);
 
             auto src_qp_idx = frame->get_src_qp_idx();

@@ -10,6 +10,7 @@
 #define USE_SRD
 #define USE_SRD_FOR_CTRL
 // #define SRD_USE_ACK
+#define SRD_RDMA_WRITE
 
 // #define EMULATE_RC_ZC
 #define SCATTERED_MEMCPY
@@ -38,6 +39,8 @@ static_assert(
 
 // #define P4D
 #define P5EN
+
+static constexpr uint32_t kSRDChunkSize = 32 << 10;
 
 static const uint32_t kBundleNIC = 2;
 static const uint32_t kNumVdevices = 8;        // # of vEFA/GPUs.

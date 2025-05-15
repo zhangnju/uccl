@@ -83,8 +83,8 @@ class PullHdrBuffPool : public BuffPool {
 
 class FrameDesc {
     uint64_t pkt_hdr_addr_;      // in CPU memory.
-    uint32_t pkt_hdr_len_;       // the length of packet hdr.
     uint64_t pkt_data_addr_;     // in GPU memory.
+    uint32_t pkt_hdr_len_;       // the length of packet hdr.
     uint32_t pkt_data_len_;      // the length of packet data.
     uint32_t pkt_data_lkey_tx_;  // Tx buff may come from app.
 
@@ -104,6 +104,11 @@ class FrameDesc {
     // Used for tx to wakeup the app thread when finishing a message.
     void *poll_ctx_;
 
+    uint64_t remote_addr_;
+    uint32_t remote_rkey_;
+    // Host order
+    uint32_t imm_data_;
+
     FrameDesc(uint64_t pkt_hdr_addr, uint32_t pkt_hdr_len,
               uint64_t pkt_data_addr, uint32_t pkt_data_len,
               uint32_t pkt_data_lkey_tx, uint8_t msg_flags)
@@ -119,6 +124,10 @@ class FrameDesc {
         next_ = nullptr;
         poll_ctx_ = nullptr;
         cpe_time_tsc_ = 0;
+
+        remote_addr_ = 0;
+        remote_rkey_ = 0;
+        imm_data_ = 0;
     }
 
    public:
@@ -187,6 +196,15 @@ class FrameDesc {
     void *get_poll_ctx() const { return poll_ctx_; }
     void set_poll_ctx(void *poll_ctx) { poll_ctx_ = poll_ctx; }
 
+    uint64_t get_remote_addr() const { return remote_addr_; }
+    void set_remote_addr(uint64_t remote_addr) { remote_addr_ = remote_addr; }
+
+    uint32_t get_remote_rkey() const { return remote_rkey_; }
+    void set_remote_rkey(uint32_t remote_rkey) { remote_rkey_ = remote_rkey; }
+
+    uint32_t get_imm_data() const { return imm_data_; }
+    void set_imm_data(uint32_t imm_data) { imm_data_ = imm_data; }
+
     void clear_fields() {
         pkt_hdr_addr_ = 0;
         pkt_data_addr_ = 0;
@@ -200,6 +218,9 @@ class FrameDesc {
         next_ = nullptr;
         poll_ctx_ = nullptr;
         cpe_time_tsc_ = 0;
+        remote_addr_ = 0;
+        remote_rkey_ = 0;
+        imm_data_ = 0;
     }
 
     std::string to_string() {
@@ -357,6 +378,8 @@ class EFASocket {
                              uint32_t send_cq_size, uint32_t recv_cq_size);
     struct ibv_qp *create_srd_qp(struct ibv_cq *send_cq, struct ibv_cq *recv_cq,
                                  uint32_t send_cq_size, uint32_t recv_cq_size);
+    struct ibv_qp *create_srd_qp_ex(struct ibv_cq *send_cq, struct ibv_cq *recv_cq,
+                                    uint32_t send_cq_size, uint32_t recv_cq_size);
 
    public:
     inline uint32_t gpu_idx() const { return gpu_idx_; }
@@ -369,6 +392,8 @@ class EFASocket {
     uint32_t post_send_wr(FrameDesc *frame, uint16_t src_qp_idx);
     uint32_t post_send_wrs(std::vector<FrameDesc *> &frames,
                            uint16_t src_qp_idx);
+    uint32_t post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
+                                 uint16_t src_qp_idx);
     uint32_t post_send_wrs_for_ctrl(std::vector<FrameDesc *> &frames,
                                     uint16_t src_qp_idx);
 

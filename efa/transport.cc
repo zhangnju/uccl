@@ -157,19 +157,17 @@ RXTracking::ConsumeRet RXTracking::consume_rdma_write(UcclFlow *flow, FrameDesc 
     const auto expected_seqno = pcb->rcv_nxt;
 
     if (swift::seqno_lt(seqno, expected_seqno)) {
-        VLOG(3) << "Received old packet: " << seqno << " < " << expected_seqno;
+        DCHECK(false) << "Received old packet: " << seqno << " < " << expected_seqno;
         socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
-        socket_->push_pkt_data(msgbuf->get_pkt_data_addr());
         socket_->push_frame_desc((uint64_t)msgbuf);
         return kOldPkt;
     }
 
     const size_t distance = seqno - expected_seqno;
     if (distance >= kReassemblyMaxSeqnoDistance) {
-        VLOG(3) << "Packet too far ahead. Dropping as we can't handle SACK. "
+        DCHECK(false) << "Packet too far ahead. Dropping as we can't handle SACK. "
                 << "seqno: " << seqno << ", expected: " << expected_seqno;
         socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
-        socket_->push_pkt_data(msgbuf->get_pkt_data_addr());
         socket_->push_frame_desc((uint64_t)msgbuf);
         return kOOOUntrackable;
     }
@@ -179,10 +177,9 @@ RXTracking::ConsumeRet RXTracking::consume_rdma_write(UcclFlow *flow, FrameDesc 
     if (seqno != expected_seqno) {
         it = reass_q_.lower_bound(seqno);
         if (it != reass_q_.end() && it->first == seqno) {
-            VLOG(3) << "Received duplicate packet: " << seqno;
+            DCHECK(false) << "Received duplicate packet: " << seqno;
             // Duplicate packet. Drop it.
             socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
-            socket_->push_pkt_data(msgbuf->get_pkt_data_addr());
             socket_->push_frame_desc((uint64_t)msgbuf);
             return kOOOTrackableDup;
         }
@@ -300,6 +297,7 @@ void RXTracking::push_inorder_msgbuf_to_app(swift::Pcb *pcb) {
                 poll_ctx->cv.notify_one();
             }
         }
+        socket_->push_frame_desc((uint64_t)msgbuf);
 
         #else
         // Stash this ready message in case application threads have not
@@ -332,8 +330,11 @@ void UcclFlow::post_rx_appbuf_ctrl(Channel::Msg *rx_work)
     auto *r_info = (struct remote_rdma_info *)pkt_hdr;
     r_info->remote_addr = be64_t((uint64_t)rx_work->data);
     r_info->remote_rkey = be32_t(mr->rkey);
-    r_info->rx_buff_len = be32_t(*rx_work->len_p);
+    r_info->rx_buff_len = be32_t(rx_work->len);
     r_info->flow_id = be64_t(peer_flow_id_);
+
+    printf("post_rx_appbuf_ctrl: remote_addr: %lu, remote_rkey: %d, rx_buff_len: %d, flow_id: %ld\n", 
+        r_info->remote_addr.value(), r_info->remote_rkey.value(), r_info->rx_buff_len.value(), r_info->flow_id.value());
 
     DCHECK(msgbuf->get_pkt_data_len() == 0);
 
@@ -801,7 +802,6 @@ bool UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
     FrameDesc *deser_msgs_head = nullptr;
     FrameDesc *deser_msgs_tail = nullptr;
     auto *app_buf_cursor = tx_work.data;
-    auto remaining_bytes = tx_work.len;
     // Use the MR of the corresponding pdev.
     #ifdef CONN_SPLIT
     auto *app_mr = tx_work.mhandle->mr[tx_work.pdev_offset / (kNumEnginesPerVdev / kBundleNIC)];
@@ -824,6 +824,8 @@ bool UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
         uint64_t remote_addr = r_info.remote_addr.value();
         uint32_t remote_rkey = r_info.remote_rkey.value();
     #endif
+
+    auto remaining_bytes = tx_work.len;
 
     while (remaining_bytes > 0 || tx_work.len == 0) {
         auto payload_len = std::min(remaining_bytes, (int)kUcclPktDataMaxLen);
@@ -2329,7 +2331,7 @@ PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
     for (int i = 0; i < n; i++) {
         msg[i] = {
             .opcode = Channel::Msg::Op::kRx,
-            .len = 0,
+            .len = len_p[i],
             .len_p = &(len_p[i]),
             .data = data[i],
             .mhandle = mhandle[i],
@@ -2384,7 +2386,7 @@ int Endpoint::uccl_regmr_dmabuf(int pdev, void *addr, size_t len, int type,
 
     *mr =
         ibv_reg_dmabuf_mr(factory_dev->pd, offset, len, (uint64_t)addr, fd,
-                          IBV_ACCESS_LOCAL_WRITE);
+                          IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
 
     return 0;
 }
@@ -2394,7 +2396,7 @@ int Endpoint::uccl_regmr(int pdev, void *addr, size_t len,
     auto factory_dev = EFAFactory::GetEFADevice(pdev);
 
     *mr =
-        ibv_reg_mr(factory_dev->pd, addr, len, IBV_ACCESS_LOCAL_WRITE);
+        ibv_reg_mr(factory_dev->pd, addr, len, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
 
     return 0;
 }

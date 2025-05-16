@@ -414,6 +414,8 @@ ncclResult_t pluginIsend(void *sendComm, void *data, int size, int tag,
     *request = req;
     // LOG(INFO) << "pluginIsend on size " << size;
 
+    printf("pluginIsend on vdev: %d, size: %d, engine_id: %d, data: %lu\n", vdev, size, req->poll_ctx->engine_idx, (uint64_t)data);
+
 #ifdef POLLCTX_DEBUG
     LOG(INFO) << std::this_thread::get_id() << " pluginIsend on vdev: " << vdev
               << " size " << size << " engine_id " << req->poll_ctx->engine_idx
@@ -442,6 +444,11 @@ ncclResult_t pluginIrecv(void *recvComm, int n, void **data, int *sizes,
     struct UcclRequest *req = reinterpret_cast<struct UcclRequest *>(addr);
     req->type = ReqRx;
     req->n = n;
+
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+    req->recv_len[0] = sizes[0];
+    #endif
+
     req->poll_ctx =
         ep->uccl_recv_multi_async(conn_id, data, req->recv_len, mhs, n);
     req->req_pool = (void *)rcomm->base.uccl_req_pool.get();
@@ -455,6 +462,8 @@ ncclResult_t pluginIrecv(void *recvComm, int n, void **data, int *sizes,
               << " n " << n << " req_id " << req->poll_ctx->req_id
               << " data ptr " << std::hex << data;
 #endif
+
+    printf("pluginIrecv on vdev: %d, size: %d, engine_id: %d, data[0]: %lu\n", vdev, sizes[0], req->poll_ctx->engine_idx, (uint64_t)data[0]);
 
     return ncclSuccess;
 }

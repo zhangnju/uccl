@@ -65,6 +65,9 @@ NCCL_TESTS_PATH="${NCCL_TESTS_PATH}/alltoall_perf"
 
 export PATH=/opt/amazon/openmpi/bin:$PATH
 
+# Clean up /tmp
+sudo find /tmp -user xzhiying -delete
+
 # run the test binary
 mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x LD_LIBRARY_PATH=${LD_LIBRARY_PATH} \
@@ -89,8 +92,8 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x GLOG_logtostderr=0 \
       -x UCCL_ENGINE_QUIET=1 \
       ${NCCL_TESTS_PATH} \
-      -f 2 -b 1K -e 16G \
-      -w 5 -n 10 \
+      -f 2 -b 8K -e 8K \
+      -w 0 -n 5 \
       -c 1 -g 1 -t 1
 
 # -x NCCL_DEBUG=INFO \

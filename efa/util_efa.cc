@@ -369,6 +369,33 @@ struct ibv_qp *EFASocket::create_srd_qp_ex(struct ibv_cq *send_cq,
         exit(1);
     }
 
+    struct ibv_qp_attr attr = {};
+    attr.qp_state = IBV_QPS_INIT;
+    attr.pkey_index = 0;
+    attr.port_num = EFA_PORT_NUM;
+    attr.qkey = QKEY;
+    if (ibv_modify_qp(
+            qp, &attr,
+            IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY)) {
+        perror("Failed to modify QP to INIT");
+        exit(1);
+    }
+
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTR;
+    if (ibv_modify_qp(qp, &attr, IBV_QP_STATE)) {
+        perror("Failed to modify QP to RTR");
+        exit(1);
+    }
+
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTS;
+    attr.sq_psn = SQ_PSN;  // Set initial Send Queue PSN
+    if (ibv_modify_qp(qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
+        perror("Failed to modify QP to RTS");
+        exit(1);
+    }
+
     return qp;
 }
 
@@ -479,8 +506,8 @@ uint32_t EFASocket::post_send_wr(FrameDesc *frame, uint16_t src_qp_idx) {
 
 uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
                                         uint16_t src_qp_idx) {
-    struct ibv_sge sge[kMaxChainedWr];
-
+    
+    int ret = 0;
     auto *qp = qp_list_[src_qp_idx];
     auto *qpx = ibv_qp_to_qp_ex(qp);
 
@@ -495,19 +522,18 @@ uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
         DCHECK(frame->get_src_qp_idx() == UINT16_MAX);
         frame->set_src_qp_idx(src_qp_idx);
 
+        qpx->wr_id = (uint64_t)frame;
+
         ibv_wr_rdma_write_imm(qpx, frame->get_remote_rkey(), frame->get_remote_addr(), htobe32(frame->get_imm_data()));
-
-        sge[i] = {frame->get_pkt_data_addr(), frame->get_pkt_data_len(),
-                  frame->get_pkt_data_lkey_tx()};
-
-        ibv_wr_set_sge_list(qpx, 1, &sge[i]);
-        
-        i++;
+        printf("ibv_wr_rdma_write_imm, rkey: %d, addr: %lu, imm: %d\n", frame->get_remote_rkey(), frame->get_remote_addr(), frame->get_imm_data());
+        ibv_wr_set_sge(qpx, frame->get_pkt_data_lkey_tx(), frame->get_pkt_data_addr(), frame->get_pkt_data_len());
+        printf("ibv_wr_set_sge, lkey: %d, addr: %lu, len: %d\n", frame->get_pkt_data_lkey_tx(), frame->get_pkt_data_addr(), frame->get_pkt_data_len());
 
         ibv_wr_set_ud_addr(qpx, frame->get_dest_ah(), frame->get_dest_qpn(), QKEY);
 
-        if (i == kMaxChainedWr - 1) {
-            ibv_wr_complete(qpx);    
+        if (i++ == kMaxChainedWr - 1) {
+            ret = ibv_wr_complete(qpx);
+            DCHECK(ret == 0) << "ibv_wr_complete failed" << ret;
             i = 0;
             ibv_wr_start(qpx);
         }
@@ -519,7 +545,10 @@ uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
         out_bytes_ += frame->get_pkt_data_len();
     }
 
-    if (i) ibv_wr_complete(qpx);
+    if (i) {
+        ret = ibv_wr_complete(qpx);
+        DCHECK(ret == 0) << "ibv_wr_complete failed" << ret;
+    }
 
     return frames.size();
 }
@@ -644,7 +673,7 @@ void EFASocket::post_recv_rdma_write_wrs(uint32_t budget, uint16_t qp_idx)
     if (deficit_cnt < kMaxRecvWrDeficit) return;
 
     int ret;
-    uint64_t pkt_hdr_buf, pkt_data_buf, frame_desc_buf;
+    uint64_t frame_desc_buf;
     auto *qp = qp_list_[qp_idx];
 
     auto *wr_head = &recv_wr_vec_[0];
@@ -669,7 +698,7 @@ void EFASocket::post_recv_rdma_write_wrs(uint32_t budget, uint16_t qp_idx)
             struct ibv_recv_wr *bad_wr;
             // Post receive buffer
             if (ibv_post_recv(qp, wr_head, &bad_wr)) {
-                perror("Failed to post recv");
+                perror("post_recv_rdma_write_wrs: Failed to post recv");
                 exit(1);
             }
             if (i + 1 != deficit_cnt)
@@ -727,7 +756,7 @@ void EFASocket::post_recv_wrs(uint32_t budget, uint16_t qp_idx) {
             struct ibv_recv_wr *bad_wr;
             // Post receive buffer
             if (ibv_post_recv(qp, wr_head, &bad_wr)) {
-                perror("Failed to post recv");
+                perror("post_recv_wrs: Failed to post recv");
                 exit(1);
             }
             if (i + 1 != deficit_cnt)
@@ -779,7 +808,7 @@ void EFASocket::post_recv_wrs_for_ctrl(uint32_t budget, uint16_t qp_idx) {
             struct ibv_recv_wr *bad_wr;
             // Post receive buffer
             if (ibv_post_recv(qp, wr_head, &bad_wr)) {
-                perror("Failed to post recv");
+                perror("post_recv_wrs_for_ctrl: Failed to post recv");
                 exit(1);
             }
             if (i + 1 != deficit_cnt)
@@ -875,6 +904,7 @@ std::vector<FrameDesc *> EFASocket::poll_recv_cq(uint32_t budget) {
 
             #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
             DCHECK(wc_[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM);
+            printf("poll_recv_cq: IBV_WC_RECV_RDMA_WITH_IMM\n");
             #else
             DCHECK(wc_[i].opcode == IBV_WC_RECV);
             #endif

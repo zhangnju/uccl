@@ -501,10 +501,12 @@ uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
                   frame->get_pkt_data_lkey_tx()};
 
         ibv_wr_set_sge_list(qpx, 1, &sge[i]);
+        
+        i++;
 
         ibv_wr_set_ud_addr(qpx, frame->get_dest_ah(), frame->get_dest_qpn(), QKEY);
 
-        if (i == kMaxChainedWr) {
+        if (i == kMaxChainedWr - 1) {
             ibv_wr_complete(qpx);    
             i = 0;
             ibv_wr_start(qpx);
@@ -512,15 +514,12 @@ uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
 
         send_queue_wrs_++;
         send_queue_wrs_per_qp_[src_qp_idx]++;
-        i++;
         
         out_packets_++;
         out_bytes_ += frame->get_pkt_data_len();
     }
 
-    if (i) {
-        ibv_wr_complete(qpx);
-    }
+    if (i) ibv_wr_complete(qpx);
 
     return frames.size();
 }
@@ -654,7 +653,7 @@ void EFASocket::post_recv_rdma_write_wrs(uint32_t budget, uint16_t qp_idx)
         DCHECK(ret == 0)  << frame_desc_pool_->avail_slots();
 
         auto *frame_desc = FrameDesc::Create(
-            frame_desc_buf, 0, 0, 0, kUcclPktDataMaxLen, 0, 0);
+            frame_desc_buf, 0, 0, 0, 0, 0, 0);
         frame_desc->set_src_qp_idx(qp_idx);
 
         auto *wr = &recv_wr_vec_[i % kMaxChainedWr];

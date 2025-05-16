@@ -793,6 +793,7 @@ bool UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
     struct remote_rdma_info r_info;
 
     #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        // check if there is a ready rx buffer.
         if (!check_fifo_ready(&r_info)) return false;
     #endif
 
@@ -812,7 +813,9 @@ bool UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
     #if defined(USE_SRD) && !defined(SRD_USE_ACK)
         poll_ctx->nr_tx_signals_ = 0;
         poll_ctx->flow_id = flow_id_;
+    #endif
 
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
         if (tx_work.len > r_info.rx_buff_len.value())
             tx_work.len = r_info.rx_buff_len.value();
 
@@ -825,13 +828,17 @@ bool UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
     while (remaining_bytes > 0 || tx_work.len == 0) {
         auto payload_len = std::min(remaining_bytes, (int)kUcclPktDataMaxLen);
         auto frame_desc = socket_->pop_frame_desc();
-        auto pkt_hdr = socket_->pop_pkt_hdr();
 
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        auto *msgbuf = FrameDesc::Create(frame_desc, 0, 0, (uint64_t)app_buf_cursor, payload_len, app_mr->lkey, 0);
+        #else
+        auto pkt_hdr = socket_->pop_pkt_hdr();
         // For tx, we do not allocate data buffer; therefore, we
         // should not free it later.
         auto *msgbuf = FrameDesc::Create(frame_desc, pkt_hdr, kUcclPktHdrLen,
                                          (uint64_t)app_buf_cursor, payload_len,
                                          app_mr->lkey, 0);
+        #endif
         msgbuf->set_poll_ctx(poll_ctx);
 
         #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
@@ -1270,27 +1277,31 @@ uint32_t UcclFlow::transmit_pending_packets(uint32_t budget) {
         VLOG(3) << "Transmitting seqno: " << seqno << " path_id: " << path_id;
 
         if (msgbuf->is_last()) {
+            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+            #else
             const auto *ucclh = reinterpret_cast<const UcclPktHdr *>(
                 msgbuf->get_pkt_hdr_addr());
             VLOG(2) << "Transmitting seqno: " << seqno << " payload_len: "
                     << ucclh->frame_len.value() - kUcclPktHdrLen;
+            #endif
         }
-        auto net_flags = (i == 0) ? UcclPktHdr::UcclFlags::kDataRttProbe
-                                  : UcclPktHdr::UcclFlags::kData;
-        prepare_datapacket(msgbuf, path_id, seqno, net_flags);
-        msgbuf->set_src_qp_idx(UINT16_MAX);
-        msgbuf->set_dest_ah(remote_ah_);
-        msgbuf->set_dest_qpn(remote_meta_->qpn_list[dst_qp_idx]);
-
         #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
         auto ctrl_hdr = IMMData(0);
-        // check peer_flow_id_'s higher 42bits are all zero.
-        DCHECK((peer_flow_id_ >> 42) == 0);
+        // check peer_flow_id_'s higher (64 - kFLOWID_BITS) bits are all zero.
+        DCHECK((peer_flow_id_ >> (64 - IMMData::kFLOWID_BITS)) == 0);
         ctrl_hdr.SetFlowID(peer_flow_id_);
         ctrl_hdr.SetSeq(seqno);
         ctrl_hdr.SetLast(msgbuf->is_last());
         msgbuf->set_imm_data(ctrl_hdr.GetImmData());
+        #else
+        auto net_flags = (i == 0) ? UcclPktHdr::UcclFlags::kDataRttProbe
+                                  : UcclPktHdr::UcclFlags::kData;
+        prepare_datapacket(msgbuf, path_id, seqno, net_flags);
         #endif
+        
+        msgbuf->set_src_qp_idx(UINT16_MAX);
+        msgbuf->set_dest_ah(remote_ah_);
+        msgbuf->set_dest_qpn(remote_meta_->qpn_list[dst_qp_idx]);
 
         pending_tx_frames_.push_back(msgbuf);
 
@@ -1305,7 +1316,11 @@ uint32_t UcclFlow::transmit_pending_packets(uint32_t budget) {
     // Considering ack coalescing.
     last_received_rwnd_ -= pending_tx_frames_.size();
 
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+    socket_->post_rdma_write_wrs(pending_tx_frames_, src_qp_idx);
+    #else
     socket_->post_send_wrs(pending_tx_frames_, src_qp_idx);
+    #endif
     // printf("send with pdev: %d on engine %d\n", socket_->pdev_idx(), local_engine_idx_);
     pending_tx_frames_.clear();
 

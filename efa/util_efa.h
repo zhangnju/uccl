@@ -97,6 +97,8 @@ class FrameDesc {
     // Flags to denote the message buffer state.
     static const uint8_t UCCL_MSGBUF_FLAGS_SYN = (1 << 0);
     static const uint8_t UCCL_MSGBUF_FLAGS_FIN = (1 << 1);
+    static const uint8_t UCCL_MSGBUF_FLAGS_WRITE = (1 << 2);
+    static const uint8_t UCCL_MSGBUF_FLAGS_WRITE_CTRL = (1 << 3);
     uint8_t msg_flags_;
 
     // Pointing to the next message buffer in the chain.
@@ -184,6 +186,8 @@ class FrameDesc {
     bool is_first() const { return (msg_flags_ & UCCL_MSGBUF_FLAGS_SYN) != 0; }
     // Returns true if this is the last in a message.
     bool is_last() const { return (msg_flags_ & UCCL_MSGBUF_FLAGS_FIN) != 0; }
+    bool is_write() const { return (msg_flags_ & UCCL_MSGBUF_FLAGS_WRITE) != 0; }
+    bool is_write_ctrl() const { return (msg_flags_ & UCCL_MSGBUF_FLAGS_WRITE_CTRL) != 0; }
 
     // Returns the next message buffer index in the chain.
     FrameDesc *next() const { return next_; }
@@ -192,6 +196,8 @@ class FrameDesc {
 
     void mark_first() { add_msg_flags(UCCL_MSGBUF_FLAGS_SYN); }
     void mark_last() { add_msg_flags(UCCL_MSGBUF_FLAGS_FIN); }
+    void mark_write() { add_msg_flags(UCCL_MSGBUF_FLAGS_WRITE); }
+    void mark_write_ctrl() { add_msg_flags(UCCL_MSGBUF_FLAGS_WRITE_CTRL); }
 
     void *get_poll_ctx() const { return poll_ctx_; }
     void set_poll_ctx(void *poll_ctx) { poll_ctx_ = poll_ctx; }
@@ -402,6 +408,7 @@ class EFASocket {
     // qpns. The transport needs to supply the src_qp_idx so it can maintain
     // per-path state. Here path_id = <src_qpn, dst_qpn>.
     void post_recv_wrs(uint32_t budget, uint16_t qp_idx);
+    void post_recv_rdma_write_wrs(uint32_t budget, uint16_t qp_idx);
     void post_recv_wrs_for_ctrl(uint32_t budget, uint16_t qp_idx);
 
     // This polls send_cq_ for data qps; wr_id is FrameDesc*.

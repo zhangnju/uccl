@@ -555,6 +555,9 @@ ncclResult_t pluginTest(void *request, int *done, int *size) {
         *done = 1;
         if (req->type == ReqTx) {
             size[0] = req->send_len;
+            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+            size[0] = req->poll_ctx->fix_tx_len;
+            #endif
             VLOG(3) << "pluginTest ReqTx done: " << size[0];
         } else if (req->type == ReqRx) {
             for (int i = 0; i < req->n; i++) size[i] = req->recv_len[i];

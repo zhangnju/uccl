@@ -134,7 +134,7 @@ static const uint32_t RECV_BATCH_SIZE = 32;
 static const uint32_t SEND_BATCH_SIZE = 16;
 static const uint32_t QKEY = 0x12345;
 static const uint32_t SQ_PSN = 0x12345;
-static const uint64_t MAX_FLOW_ID = 1000000;
+static const uint64_t MAX_FLOW_ID = 100000;
 
 // Do load balancing every kNMSGLB messages.
 static const uint32_t kNMSGLB = 1;

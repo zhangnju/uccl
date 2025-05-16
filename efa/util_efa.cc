@@ -212,6 +212,9 @@ EFASocket::EFASocket(int gpu_idx, int pdev_idx, int socket_idx)
     ret = cudaSetDevice(gpu_idx);
     CHECK(ret == cudaSuccess) << "cudaSetDevice failed " << old_gpu_idx << " " << gpu_idx;
 
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+    // No need to allocate memory for packet data as use SRD_RDMA_WRITE
+    #else
     // Allocate memory for packet data.
     void *pkt_data_buf_ = nullptr;
     auto cuda_ret =
@@ -228,6 +231,7 @@ EFASocket::EFASocket(int gpu_idx, int pdev_idx, int socket_idx)
                    IBV_ACCESS_LOCAL_WRITE);
     DCHECK(pkt_data_mr_ != nullptr) << "ibv_reg_mr failed";
     pkt_data_pool_ = new PktDataBuffPool(pkt_data_mr_);
+    #endif
 
     // Allocate memory for frame desc.
     frame_desc_pool_ = new FrameDescBuffPool();
@@ -251,7 +255,11 @@ EFASocket::EFASocket(int gpu_idx, int pdev_idx, int socket_idx)
     for (int i = 0; i < kMaxSrcDstQP; i++) {
         qp_list_[i] =
             (this->*create_qp_func)(send_cq_, recv_cq_, kMaxSendWr, kMaxRecvWr);
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        post_recv_rdma_write_wrs(kMaxRecvWr, i);
+        #else
         post_recv_wrs(kMaxRecvWr, i);
+        #endif
     }
 
     // Create QP for ACK packets.
@@ -629,6 +637,51 @@ uint32_t EFASocket::post_send_wrs_for_ctrl(std::vector<FrameDesc *> &frames,
     return frames.size();
 }
 
+void EFASocket::post_recv_rdma_write_wrs(uint32_t budget, uint16_t qp_idx)
+{
+    DCHECK(qp_idx < kMaxSrcDstQP);
+    auto &deficit_cnt = deficit_cnt_recv_wrs_[qp_idx];
+    deficit_cnt += budget;
+    if (deficit_cnt < kMaxRecvWrDeficit) return;
+
+    int ret;
+    uint64_t pkt_hdr_buf, pkt_data_buf, frame_desc_buf;
+    auto *qp = qp_list_[qp_idx];
+
+    auto *wr_head = &recv_wr_vec_[0];
+    for (int i = 0; i < deficit_cnt; i++) {
+        ret = frame_desc_pool_->alloc_buff(&frame_desc_buf);
+        DCHECK(ret == 0)  << frame_desc_pool_->avail_slots();
+
+        auto *frame_desc = FrameDesc::Create(
+            frame_desc_buf, 0, 0, 0, kUcclPktDataMaxLen, 0, 0);
+        frame_desc->set_src_qp_idx(qp_idx);
+
+        auto *wr = &recv_wr_vec_[i % kMaxChainedWr];
+
+        wr->wr_id = (uint64_t)frame_desc;
+        wr->num_sge = 0;
+        wr->sg_list = nullptr;
+
+        bool is_last = (i + 1) % kMaxChainedWr == 0 || (i + 1) == deficit_cnt;
+        wr->next = is_last ? nullptr : &recv_wr_vec_[(i + 1) % kMaxChainedWr];
+
+        if (is_last) {
+            struct ibv_recv_wr *bad_wr;
+            // Post receive buffer
+            if (ibv_post_recv(qp, wr_head, &bad_wr)) {
+                perror("Failed to post recv");
+                exit(1);
+            }
+            if (i + 1 != deficit_cnt)
+                wr_head = &recv_wr_vec_[(i + 1) % kMaxChainedWr];
+        }
+    }
+
+    recv_queue_wrs_ += deficit_cnt;
+    deficit_cnt = 0;
+}
+
 void EFASocket::post_recv_wrs(uint32_t budget, uint16_t qp_idx) {
     DCHECK(qp_idx < kMaxSrcDstQP);
     auto &deficit_cnt = deficit_cnt_recv_wrs_[qp_idx];
@@ -833,12 +886,19 @@ std::vector<FrameDesc *> EFASocket::poll_recv_cq(uint32_t budget) {
             #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
             frame->set_imm_data(be32toh(wc_[i].imm_data));
             frame->set_pkt_data_len(wc_[i].byte_len);
+            frame->set_msg_flags(0);
+            frame->mark_write();
             #endif
 
             frames.push_back(frame);
 
             auto src_qp_idx = frame->get_src_qp_idx();
+
+            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+            post_recv_rdma_write_wrs(1, src_qp_idx);
+            #else
             post_recv_wrs(1, src_qp_idx);
+            #endif
 
             in_packets_++;
             in_bytes_ += wc_[i].byte_len;
@@ -872,6 +932,12 @@ std::tuple<std::vector<FrameDesc *>, uint32_t> EFASocket::poll_ctrl_cq(
             frame->set_cpe_time_tsc(now);
 
             if (wc_[i].opcode == IBV_WC_RECV) {
+
+                #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+                frame->set_msg_flags(0);
+                frame->mark_write_ctrl();
+                #endif
+
                 recv_frames.push_back(frame);
 
                 auto src_qp_idx = frame->get_src_qp_idx();

@@ -60,7 +60,11 @@ struct __attribute__((packed)) UcclSackHdr {
 static const size_t kUcclPktHdrLen = sizeof(UcclPktHdr);
 static const size_t kUcclPullHdrLen = sizeof(UcclPullHdr);
 static_assert(kUcclPullHdrLen <= EFA_MAX_INLINE_SIZE, "PullHdr too large for inline");
+#if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+static const size_t kUcclPktDataMaxLen = kSRDChunkSize;
+#else
 static const size_t kUcclPktDataMaxLen = EFA_MAX_PAYLOAD - kUcclPktHdrLen;
+#endif
 static const size_t kUcclSackHdrLen = sizeof(UcclSackHdr);
 
 inline UcclPktHdr::UcclFlags operator|(UcclPktHdr::UcclFlags lhs,

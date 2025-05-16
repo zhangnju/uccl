@@ -61,21 +61,28 @@ struct Mhandle {
 };
 
 struct remote_rdma_info {
-    uint64_t remote_addr;
-    uint32_t remote_rkey;
+    be64_t remote_addr;
+    be32_t remote_rkey;
+    be32_t rx_buff_len;
+    be64_t flow_id;
 };
 
 class IMMData {
 public:
     // High-------------------32bit----------------------Low
-    //  |                FLOWID                |    SEQ   |
-    //                   22bit                     10bit
-    constexpr static int kSEQ = 0;
+    //  |            FLOWID            |    SEQ   |  LAST |
+    //                22bit                 9bit     1bit
+    constexpr static int kLAST = 0;
+    constexpr static int kSEQ = 1;
     constexpr static int kFLOWID = 10;
-    constexpr static int kSEQ_BITS = kFLOWID;
-    constexpr static int kFLOWID_BITS = 32 - kSEQ_BITS;
+    
+    constexpr static int kLAST_BITS = 1;
+    constexpr static int kSEQ_BITS = 9;
+    constexpr static int kFLOWID_BITS = 32 - kSEQ_BITS - kLAST_BITS;
+    
     constexpr static uint32_t kFLOWID_MASK = (1 << kFLOWID_BITS) - 1;
     constexpr static uint32_t kSEQ_MASK = (1 << kSEQ_BITS) - 1;
+    constexpr static uint32_t kLAST_MASK = 1;
 
     IMMData(uint32_t imm_data): imm_data_(imm_data) {}
 
@@ -87,12 +94,20 @@ public:
         return imm_data_ >> kSEQ & kSEQ_MASK;
     }
 
+    inline bool GetLast() const {
+        return imm_data_ >> kLAST & kLAST_MASK;
+    }
+
     inline void SetFlowID(uint32_t flow_id) {
         imm_data_ |= (flow_id & kFLOWID_MASK) << kFLOWID;
     }
 
     inline void SetSeq(uint32_t seq) {
         imm_data_ |= (seq & kSEQ_MASK) << kSEQ;
+    }
+
+    inline void SetLast(bool last) {
+        imm_data_ |= (last & kLAST_MASK) << kLAST;
     }
 
     inline uint32_t GetImmData() const {
@@ -111,6 +126,7 @@ struct alignas(64) PollCtx {
     std::atomic<uint16_t> num_unfinished;  // Number of unfinished requests.
     uint64_t timestamp;                    // Timestamp for request issuing.
     uint32_t engine_idx;                   // Engine index for request issuing.
+    uint32_t fix_tx_len;                   // Fixed tx length.
 #ifdef POLLCTX_DEBUG
     FlowID flow_id;   // Flow ID for request issuing.
     uint64_t req_id;  // Tx ID for request issuing.
@@ -131,6 +147,8 @@ struct alignas(64) PollCtx {
         done = false;
         num_unfinished = 0;
         timestamp = 0;
+        engine_idx = 0;
+        fix_tx_len = 0;
     }
 
     inline void write_barrier() {
@@ -416,6 +434,8 @@ class RXTracking {
 
     ConsumeRet consume(UcclFlow *flow, FrameDesc *msgbuf);
 
+    ConsumeRet consume_rdma_write(UcclFlow *flow, FrameDesc *msgbuf);
+
    private:
     std::unordered_map<FlowID, UcclFlow *> &active_flows_map_;
     void push_inorder_msgbuf_to_app(swift::Pcb *pcb);
@@ -559,8 +579,14 @@ class UcclFlow {
     void rx_messages_srd_rdma_write();
 
     inline void rx_supply_app_buf(Channel::Msg &rx_work) {
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        post_rx_appbuf_ctrl(&rx_work);
+        #else
         rx_tracking_.try_copy_msgbuf_to_appbuf(&rx_work);
+        #endif
     }
+
+    void post_rx_appbuf_ctrl(Channel::Msg *rx_work);
 
     /**
      * @brief Push a Message from the application onto the egress queue of
@@ -682,6 +708,9 @@ class UcclFlow {
     std::vector<FrameDesc *> missing_frames_;
     // Frames that are pending rx processing in a batch.
     std::deque<FrameDesc *> pending_rx_msgbufs_;
+
+    std::deque<struct remote_rdma_info > ready_rxbuffs_;
+
     // Whether this is a sender or receiver flow in NCCL.
     bool is_sender_;
 

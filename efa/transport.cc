@@ -144,6 +144,77 @@ std::optional<FrameDesc *> TXTracking::get_and_update_oldest_unsent() {
     return msgbuf;
 }
 
+RXTracking::ConsumeRet RXTracking::consume_rdma_write(UcclFlow *flow, FrameDesc *msgbuf)
+{
+    auto ctrl_hdr = IMMData(msgbuf->get_imm_data());
+
+    auto *pcb = flow->get_pcb();
+
+    uint8_t *pkt_addr = (uint8_t *)msgbuf->get_pkt_hdr_addr() + EFA_UD_ADDITION;
+    auto *ucclh = reinterpret_cast<UcclPktHdr *>(pkt_addr);
+    auto frame_len = msgbuf->get_pkt_data_len();
+    auto seqno = ctrl_hdr.GetSeq();
+    const auto expected_seqno = pcb->rcv_nxt;
+
+    if (swift::seqno_lt(seqno, expected_seqno)) {
+        VLOG(3) << "Received old packet: " << seqno << " < " << expected_seqno;
+        socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
+        socket_->push_pkt_data(msgbuf->get_pkt_data_addr());
+        socket_->push_frame_desc((uint64_t)msgbuf);
+        return kOldPkt;
+    }
+
+    const size_t distance = seqno - expected_seqno;
+    if (distance >= kReassemblyMaxSeqnoDistance) {
+        VLOG(3) << "Packet too far ahead. Dropping as we can't handle SACK. "
+                << "seqno: " << seqno << ", expected: " << expected_seqno;
+        socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
+        socket_->push_pkt_data(msgbuf->get_pkt_data_addr());
+        socket_->push_frame_desc((uint64_t)msgbuf);
+        return kOOOUntrackable;
+    }
+
+    // Only iterate through the deque if we must, i.e., for ooo packts only
+    auto it = reass_q_.begin();
+    if (seqno != expected_seqno) {
+        it = reass_q_.lower_bound(seqno);
+        if (it != reass_q_.end() && it->first == seqno) {
+            VLOG(3) << "Received duplicate packet: " << seqno;
+            // Duplicate packet. Drop it.
+            socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
+            socket_->push_pkt_data(msgbuf->get_pkt_data_addr());
+            socket_->push_frame_desc((uint64_t)msgbuf);
+            return kOOOTrackableDup;
+        }
+        VLOG(3) << "Received OOO trackable packet: " << seqno
+                << " payload_len: " << frame_len - kUcclPktHdrLen
+                << " reass_q size " << reass_q_.size();
+    } else {
+        VLOG(3) << "Received expected packet: " << seqno
+                << " payload_len: " << frame_len - kUcclPktHdrLen;
+    }
+
+    num_unconsumed_msgbufs_++;
+    // if (num_unconsumed_msgbufs_ >= kMaxUnconsumedRxMsgbufs)
+    //     LOG(INFO) << "num_unconsumed_msgbufs_: " << num_unconsumed_msgbufs_;
+
+    // Buffer the packet in the frame pool. It may be out-of-order.
+    reass_q_.insert(it, {seqno, msgbuf});
+
+    VLOG_IF(3, num_unconsumed_msgbufs_ >= kMaxUnconsumedRxMsgbufs)
+        << "seqno: " << seqno << " expected_seqno: " << expected_seqno
+        << " distance: " << distance << " pcb->rcv_nxt: " << pcb->rcv_nxt
+        << " reass_q_.begin()->first: " << reass_q_.begin()->first;
+
+    // Update the SACK bitmap for the newly received packet.
+    pcb->sack_bitmap_bit_set(distance);
+
+    // These frames will be freed when the message is delivered to the app.
+    push_inorder_msgbuf_to_app(pcb);
+
+    return kOOOTrackableExpectedOrInOrder;
+}
+
 RXTracking::ConsumeRet RXTracking::consume(UcclFlow *flow, FrameDesc *msgbuf) {
     
     auto *pcb = flow->get_pcb();
@@ -218,14 +289,58 @@ void RXTracking::push_inorder_msgbuf_to_app(swift::Pcb *pcb) {
         auto *msgbuf = reass_q_.begin()->second;
         reass_q_.erase(reass_q_.begin());
 
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        if (msgbuf->is_last()) {
+            // wakeup the app thread waiting on endpoint.
+            auto *poll_ctx = (PollCtx *)msgbuf->get_poll_ctx();
+            if (--(poll_ctx->num_unfinished) == 0) {
+                poll_ctx->write_barrier();
+                std::lock_guard<std::mutex> lock(poll_ctx->mu);
+                poll_ctx->done = true;
+                poll_ctx->cv.notify_one();
+            }
+        }
+
+        #else
         // Stash this ready message in case application threads have not
         // supplied the app buffer while the engine keeps receiving messages.
         ready_msg_queue_.push_back(msgbuf);
         try_copy_msgbuf_to_appbuf(nullptr);
+        #endif
 
         pcb->advance_rcv_nxt();
         pcb->sack_bitmap_shift_left_one();
     }
+}
+
+void UcclFlow::post_rx_appbuf_ctrl(Channel::Msg *rx_work)
+{
+    DCHECK(rx_work->opcode == Channel::Msg::kRx);
+
+    auto *mr = rx_work->mhandle->mr[rx_work->pdev_offset];
+
+    // Use ctrl qp to send r_info to peer.
+    auto rand_ctrl_path_id = std::rand() % kMaxPathCtrl;
+
+    auto [src_qp_idx, dst_qp_idx] = path_id_to_src_dst_qp_for_ctrl(rand_ctrl_path_id);
+
+    auto frame_desc = socket_->pop_frame_desc();
+    auto pkt_hdr = socket_->pop_pkt_hdr();
+
+    auto msgbuf = FrameDesc::Create(frame_desc, pkt_hdr, sizeof(struct remote_rdma_info), 0, 0, 0, 0);
+
+    auto *r_info = (struct remote_rdma_info *)pkt_hdr;
+    r_info->remote_addr = be64_t((uint64_t)rx_work->data);
+    r_info->remote_rkey = be32_t(mr->rkey);
+    r_info->rx_buff_len = be32_t(*rx_work->len_p);
+    r_info->flow_id = be64_t(peer_flow_id_);
+
+    DCHECK(msgbuf->get_pkt_data_len() == 0);
+
+    msgbuf->set_dest_ah(remote_ah_);
+    msgbuf->set_dest_qpn(remote_meta_->qpn_list_ctrl[dst_qp_idx]);
+
+    socket_->post_send_wr(msgbuf, src_qp_idx);
 }
 
 #ifdef SCATTERED_MEMCPY
@@ -659,7 +774,17 @@ void UcclFlow::rx_messages() {
     transmit_pending_packets_drr(true);
 }
 
-bool UcclFlow::check_fifo_ready(struct remote_rdma_info *r_info) {
+bool UcclFlow::check_fifo_ready(struct remote_rdma_info *r_info)
+{
+    if (ready_rxbuffs_.empty()) return false;
+
+    auto it = ready_rxbuffs_.front();
+    ready_rxbuffs_.pop_front();
+
+    r_info->flow_id = it.flow_id;
+    r_info->remote_addr = it.remote_addr;
+    r_info->remote_rkey = it.remote_rkey;
+    r_info->rx_buff_len = it.rx_buff_len;
     return true;
 }
 
@@ -687,6 +812,14 @@ bool UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
     #if defined(USE_SRD) && !defined(SRD_USE_ACK)
         poll_ctx->nr_tx_signals_ = 0;
         poll_ctx->flow_id = flow_id_;
+
+        if (tx_work.len > r_info.rx_buff_len.value())
+            tx_work.len = r_info.rx_buff_len.value();
+
+        poll_ctx->fix_tx_len = tx_work.len;
+
+        uint64_t remote_addr = r_info.remote_addr.value();
+        uint32_t remote_rkey = r_info.remote_rkey.value();
     #endif
 
     while (remaining_bytes > 0 || tx_work.len == 0) {
@@ -702,9 +835,9 @@ bool UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
         msgbuf->set_poll_ctx(poll_ctx);
 
         #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
-        msgbuf->set_remote_addr(r_info.remote_addr);
-        msgbuf->set_remote_rkey(r_info.remote_rkey);
-        r_info.remote_addr += payload_len;
+        msgbuf->set_remote_addr(remote_addr);
+        msgbuf->set_remote_rkey(remote_rkey);
+        remote_addr += payload_len;
         #endif
 
         // auto pkt_payload_addr = msgbuf->get_pkt_addr() + kUcclPktHdrLen;
@@ -1155,6 +1288,7 @@ uint32_t UcclFlow::transmit_pending_packets(uint32_t budget) {
         DCHECK((peer_flow_id_ >> 42) == 0);
         ctrl_hdr.SetFlowID(peer_flow_id_);
         ctrl_hdr.SetSeq(seqno);
+        ctrl_hdr.SetLast(msgbuf->is_last());
         msgbuf->set_imm_data(ctrl_hdr.GetImmData());
         #endif
 
@@ -1435,23 +1569,37 @@ void UcclEngine::srd_ack_tx_signals(std::vector<FrameDesc *> &frames) {
 void UcclFlow::rx_messages_srd_rdma_write()
 {
     for (auto *msgbuf : pending_rx_msgbufs_) {
-        auto ctrl_hdr = IMMData(msgbuf->get_imm_data());
-        auto byte_len = msgbuf->get_pkt_data_len();
-        auto seqno = ctrl_hdr.GetSeq();
+        rx_tracking_.consume_rdma_write(this, msgbuf);
     }
 }
 
 void UcclEngine::process_rx_msg_srd_rdma_write(std::vector<FrameDesc *> &pkt_msgs)
 {
     for (auto &msgbuf : pkt_msgs) {
-        auto ctrl_hdr = IMMData(msgbuf->get_imm_data());
+        if (msgbuf->is_write_ctrl()) {
+            uint8_t * ctrl_hdr = (uint8_t *)msgbuf->get_pkt_hdr_addr() + EFA_UD_ADDITION;
+            struct remote_rdma_info *r_info = (struct remote_rdma_info *)ctrl_hdr;
+            auto flow_id = r_info->flow_id.value();
 
-        auto flow_id = ctrl_hdr.GetFlowID();
+            auto it = active_flows_map_.find(flow_id);
+            DCHECK(it != active_flows_map_.end());
 
-        auto it = active_flows_map_.find(flow_id);
-        DCHECK(it != active_flows_map_.end());
+            it->second->ready_rxbuffs_.push_back(*r_info);
 
-        it->second->pending_rx_msgbufs_.push_back(msgbuf);
+        } else {
+            DCHECK(msgbuf->is_write());
+            auto ctrl_hdr = IMMData(msgbuf->get_imm_data());
+            auto flow_id = ctrl_hdr.GetFlowID();
+
+            auto it = active_flows_map_.find(flow_id);
+            DCHECK(it != active_flows_map_.end());
+
+            if (ctrl_hdr.GetLast()) {
+                msgbuf->mark_last();
+            }
+
+            it->second->pending_rx_msgbufs_.push_back(msgbuf);
+        }
     }
 
     for (auto &[flow_id, flow] : active_flows_map_) {
@@ -2170,6 +2318,7 @@ PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
             .len_p = &(len_p[i]),
             .data = data[i],
             .mhandle = mhandle[i],
+            .pdev_offset = pdev_offset,
             .flow_id = conn_id.flow_id,
             .deser_msgs = nullptr,
             .poll_ctx = poll_ctx,

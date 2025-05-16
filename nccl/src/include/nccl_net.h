@@ -76,11 +76,6 @@ typedef struct {
   // Asynchronous recv from a peer.
   // May return request == NULL if the call cannot be performed (or would block)
   ncclResult_t (*irecv)(void* recvComm, int n, void** data, int* sizes, int* tags, void** mhandles, void** request);
-  // Async send with scattered data. *request will contain iov_addrs, an array of pointers to the data buffers, 
-  // and iov_lens, an array of lengths for each buffer. Both iov_addrs and iov_lens are allocated by the plugin.
-  ncclResult_t (*irecv_scattered)(void *recvComm, int *tags, void* mhandles, void **request);
-  // Free the pointers allocated by the plugin in the irecv_scattered call.
-  ncclResult_t (*irecv_free_ptrs)(void *recvComm, void* request);
   // Perform a flush/fence to make sure all data received with NCCL_PTR_CUDA is
   // visible to the GPU
   ncclResult_t (*iflush)(void* recvComm, int n, void** data, int* sizes, void** mhandles, void** request);

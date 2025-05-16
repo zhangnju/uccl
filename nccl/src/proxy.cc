@@ -873,14 +873,6 @@ void* ncclProxyProgress(void *proxyState_) {
 
   INFO(NCCL_INIT, "[Proxy Progress] Device %d CPU core %d", proxyState->cudaDev, sched_getcpu());
 
-  // Yang: creating the sg_copy module here.
-  // int gpu_id = 0;
-  // cudaGetDevice(&gpu_id);
-  // printf("sg_copy: creating sg_copy module, gpu_id %d\n", gpu_id);
-  // proxyState->sgCopyEngine = new iovMultiFifo(kNumThBlocks);
-  // cudaStreamCreate(&proxyState->copyTestStream);
-  // cudaCheckErrors("cudaStreamCreate failed");
-
   struct ncclProxyProgressState* state = &proxyState->progressState;
   state->nextOps = -1;
   const int sig = ncclParamProxyDumpSignal();

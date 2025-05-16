@@ -25,13 +25,6 @@ inline __device__ int loadInt(int* ptr) {
   return v;
 }
 
-inline __device__ int64_t loadInt64(int64_t* ptr) {
-  int64_t v;
-  asm volatile("ld.volatile.global.u64 %0, [%1];"
-      : "=l"(v) : "l"(ptr));
-  return v;
-}
-
 template<typename RedFn, typename T, int Unroll, int BytePerPack,
          int MultimemSrcs, int MinSrcs, int MaxSrcs,
          int MultimemDsts, int MinDsts, int MaxDsts, int PreOpSrcs,

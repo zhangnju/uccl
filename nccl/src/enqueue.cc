@@ -1684,24 +1684,12 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
 
     //CUDACHECK(cudaLaunchKernelExC(&launchConfig, fnAddr, args));
     CUCHECK(cuLaunchKernelEx(&launchConfig, fn, nullptr, extra));
-
-    // printf("sg_copy: enqueue cuLaunchKernelEx\n");
-
-    // Yang: launch our customized sg_copy kernel.
-    // printf("sg_copy: launch sg_copy kernel after cuLaunchKernelEx\n");
-    // comm->proxyState->sgCopyEngine->initFifo();
-    // comm->proxyState->sgCopyEngine->launchSGCopyKernel();
     return ncclSuccess;
   }
   #endif
   // Standard kernel launch
   CUCHECK(cuLaunchKernel(fn, grid.x, grid.y, grid.z, block.x, block.y, block.z, smem, launchStream, nullptr, extra));
   //CUDACHECK(cudaLaunchKernel(fnAddr, grid, block, args, smem, launchStream));
-
-  // Yang: launch our customized sg_copy kernel.
-  // printf("sg_copy: launch sg_copy kernel after cuLaunchKernel\n");
-  // comm->proxyState->sgCopyEngine->initFifo();
-  // comm->proxyState->sgCopyEngine->launchSGCopyKernel();
   return ncclSuccess;
 }
 

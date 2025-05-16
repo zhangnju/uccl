@@ -65,18 +65,6 @@ struct ncclConnFifo {
   void* ptr;
 };
 
-// Yang: 64 max scattered IOVs
-#define kMaxIovs 64
-struct alignas(8) iov {
-  void* src_addrs[kMaxIovs];
-  void* dst_addrs[kMaxIovs];
-  int iov_lens[kMaxIovs];
-  int iov_n;
-  int gpu_idx; // for debugging
-  int step; // for debugging
-};
-const uint32_t kIovSize = sizeof(struct iov);
-
 #include <stdio.h>
 
 template<typename T>

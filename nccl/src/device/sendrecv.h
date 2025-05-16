@@ -164,8 +164,6 @@ struct RunWorkBatch<ncclFuncSendRecv, T, RedOp, NCCL_ALGO_RING, NCCL_PROTO_SIMPL
       if (work->recvProtoLL) {
         runRecv<ProtoLL>(subtid, subtn, group, work);
       } else {
-        // Yang: subtid: 0-31, subtn: 32, group: {3, 5, 7, 9, 11}, workIx: {0, 1, 2, 3, 4}; sometimes, group: {3, 5, 7, 9}, workIx: {0, 1, 2, 3}
-        // Yang: nWorks=6 + workIx={1,2,3,4,5,6} or nWorks=5 + workIx={0,1,2,3,4}
         runRecv<ProtoSimple<1,1>>(subtid, subtn, group, work);
       }
     }

@@ -12,6 +12,10 @@
 // #define SRD_USE_ACK
 #define SRD_RDMA_WRITE
 
+#if defined(SRD_USE_ACK) && defined(SRD_RDMA_WRITE)
+#error "We force !SRD_USE_ACK when using SRD_RDMA_WRITE."
+#endif
+
 // #define EMULATE_RC_ZC
 #define SCATTERED_MEMCPY
 // #define RTT_STATS
@@ -104,7 +108,11 @@ static constexpr double kLinkBandwidth = 400.0 * 1e9 / 8;  // 400Gbps
 
 
 static const uint8_t EFA_PORT_NUM = 1;  // The port of EFA device to use.
+#if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+static const uint32_t EFA_MTU = kSRDChunkSize;
+#else
 static const uint32_t EFA_MTU = 9000;  // Max frame on fabric, includng headers.
+#endif
 static const uint32_t EFA_MAX_PAYLOAD = 8928;  // this excludes EFA_UD_ADDITION.
 static const uint32_t EFA_HDR_OVERHEAD = EFA_MTU - EFA_MAX_PAYLOAD;
 static const uint32_t EFA_MAX_QPS = 256;         // Max QPs per EFA device.

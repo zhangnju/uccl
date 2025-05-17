@@ -1569,8 +1569,12 @@ void UcclEngine::srd_ack_tx_signals(std::vector<FrameDesc *> &frames) {
             poll_ctx->cv.notify_one();
         }
 
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        // do nothing.
+        #else
         // Free transmitted frames that are acked.
         socket_->push_pkt_hdr(frame->get_pkt_hdr_addr());
+        #endif
         // The pkt_data directly from the app buffer, thus no need to free.
         socket_->push_frame_desc((uint64_t)frame);
 

@@ -523,6 +523,7 @@ uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
         frame->set_src_qp_idx(src_qp_idx);
 
         qpx->wr_id = (uint64_t)frame;
+        qpx->wr_flags = IBV_SEND_SIGNALED;
 
         ibv_wr_rdma_write_imm(qpx, frame->get_remote_rkey(), frame->get_remote_addr(), htobe32(frame->get_imm_data()));
         printf("ibv_wr_rdma_write_imm, rkey: %d, addr: %lu, imm: %d\n", frame->get_remote_rkey(), frame->get_remote_addr(), frame->get_imm_data());
@@ -545,10 +546,8 @@ uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
         out_bytes_ += frame->get_pkt_data_len();
     }
 
-    if (i) {
-        ret = ibv_wr_complete(qpx);
-        DCHECK(ret == 0) << "ibv_wr_complete failed" << ret;
-    }
+    ret = ibv_wr_complete(qpx);
+    DCHECK(ret == 0) << "ibv_wr_complete failed" << ret;
 
     return frames.size();
 }
@@ -836,7 +835,11 @@ std::vector<FrameDesc *> EFASocket::poll_send_cq() {
             << "poll_send_cq: completion error: "
             << ibv_wc_status_str(wc_[i].status);
 
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        DCHECK(wc_[i].opcode == IBV_WC_RDMA_WRITE);
+        #else
         DCHECK(wc_[i].opcode == IBV_WC_SEND);
+        #endif
 
         auto *frame = (FrameDesc *)wc_[i].wr_id;
         auto src_qp_idx = frame->get_src_qp_idx();

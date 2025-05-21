@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <assert.h>
 #include <cuda_runtime.h>
 #include <infiniband/efadv.h>
 #include <infiniband/verbs.h>
@@ -9,25 +10,25 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define DEVICE_NAME "rdmap16s27"  // Change to your RDMA device
+#include <tuple>
+
 #define GID_INDEX 0
 #define PORT_NUM 1
 #define QKEY 0x12345
 #define MTU 8928
-#define MSG_SIZE (MTU)
-#define TCP_PORT 12345  // Port for exchanging QPNs & GIDs
-#define USE_GDR 1
+#define MSG_SIZE 32
+#define TCP_PORT 12345
 
 struct rdma_context {
     struct ibv_context *ctx;
     struct ibv_pd *pd;
-    struct ibv_cq *cq;
+    struct ibv_cq_ex *cq_ex;
     struct ibv_qp *qp;
     struct ibv_mr *mr;
     struct ibv_ah *ah;
     char *local_buf;
     uint32_t remote_rkey;
-    uint64_t remote_addr; 
+    uint64_t remote_addr;
 };
 
 size_t align_size(size_t size, size_t alignment) {
@@ -42,71 +43,6 @@ void get_gid(struct rdma_context *rdma, int gid_index, union ibv_gid *gid) {
     }
     printf("GID[%d]: %s\n", gid_index,
            inet_ntoa(*(struct in_addr *)&gid->raw[8]));
-}
-
-// Create and configure a UD QP
-struct ibv_qp *create_qp(struct rdma_context *rdma) {
-
-    struct ibv_qp_init_attr_ex qp_attr_ex = {};
-    struct efadv_qp_init_attr efa_attr = {};
-    
-    efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
-    
-    qp_attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
-
-    qp_attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
-
-    qp_attr_ex.cap.max_send_wr = 256;
-    qp_attr_ex.cap.max_recv_wr = 256; 
-    qp_attr_ex.cap.max_send_sge = 1;
-    qp_attr_ex.cap.max_recv_sge = 1;
-
-	qp_attr_ex.cap.max_inline_data = 0;
-	qp_attr_ex.pd = rdma->pd;
-	qp_attr_ex.qp_context = rdma->ctx;
-	qp_attr_ex.sq_sig_all = 1;
-
-	qp_attr_ex.send_cq = rdma->cq;
-	qp_attr_ex.recv_cq = rdma->cq;
-
-    qp_attr_ex.qp_type = IBV_QPT_DRIVER;
-
-    struct ibv_qp *qp = efadv_create_qp_ex(rdma->ctx, &qp_attr_ex, &efa_attr,
-                                           sizeof(struct efadv_qp_init_attr));
-
-    if (!qp) {
-        perror("Failed to create QP");
-        exit(1);
-    }
-
-    struct ibv_qp_attr attr = {};
-    attr.qp_state = IBV_QPS_INIT;
-    attr.pkey_index = 0;
-    attr.port_num = PORT_NUM;
-    attr.qkey = QKEY;
-    if (ibv_modify_qp(
-            qp, &attr,
-            IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY)) {
-        perror("Failed to modify QP to INIT");
-        exit(1);
-    }
-
-    memset(&attr, 0, sizeof(attr));
-    attr.qp_state = IBV_QPS_RTR;
-    if (ibv_modify_qp(qp, &attr, IBV_QP_STATE)) {
-        perror("Failed to modify QP to RTR");
-        exit(1);
-    }
-
-    memset(&attr, 0, sizeof(attr));
-    attr.qp_state = IBV_QPS_RTS;
-    attr.sq_psn = 0x12345;  // Set initial Send Queue PSN
-    if (ibv_modify_qp(qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
-        perror("Failed to modify QP to RTS");
-        exit(1);
-    }
-
-    return qp;
 }
 
 // Create AH using specific GID index
@@ -138,7 +74,8 @@ struct metadata {
 };
 
 // Exchange QPNs and GIDs via TCP
-void exchange_qpns(const char *peer_ip, metadata* local_meta, metadata* remote_meta) {
+void exchange_qpns(const char *peer_ip, metadata *local_meta,
+                   metadata *remote_meta) {
     int sock;
     struct sockaddr_in addr;
     char mode = peer_ip ? 'c' : 's';
@@ -185,9 +122,17 @@ void exchange_qpns(const char *peer_ip, metadata* local_meta, metadata* remote_m
     if (recv(sock, remote_meta, sizeof(*remote_meta), 0) <= 0)
         perror("recv() timeout");
 
+    printf(
+        "local addr=0x%lx, local rkey=0x%x, remote addr=0x%lx, remote "
+        "rkey=0x%x\n",
+        local_meta->addr, local_meta->rkey, remote_meta->addr,
+        remote_meta->rkey);
+
     close(sock);
     printf("QPNs and GIDs exchanged\n");
 }
+
+struct ibv_qp *create_qp(struct rdma_context *rdma);
 
 // Initialize RDMA resources
 struct rdma_context *init_rdma() {
@@ -196,6 +141,7 @@ struct rdma_context *init_rdma() {
 
     struct ibv_device **dev_list = ibv_get_device_list(NULL);
     rdma->ctx = ibv_open_device(dev_list[0]);
+    printf("Using device: %s\n", ibv_get_device_name(dev_list[0]));
     ibv_free_device_list(dev_list);
     if (!rdma->ctx) {
         perror("Failed to open device");
@@ -203,26 +149,32 @@ struct rdma_context *init_rdma() {
     }
 
     rdma->pd = ibv_alloc_pd(rdma->ctx);
-    rdma->cq = ibv_create_cq(rdma->ctx, 1024, NULL, NULL, 0);
-    if (!rdma->pd || !rdma->cq) {
+
+    struct ibv_cq_init_attr_ex init_attr_ex = {
+        .cqe = 1024,
+        .cq_context = NULL,
+        .channel = NULL,
+        .comp_vector = 0,
+        /* EFA requires these values for wc_flags and comp_mask.
+         * See `efa_create_cq_ex` in rdma-core.
+         */
+        .wc_flags = IBV_WC_STANDARD_FLAGS,
+        .comp_mask = 0,
+    };
+
+    rdma->cq_ex = ibv_create_cq_ex(rdma->ctx, &init_attr_ex);
+    if (!rdma->pd || !rdma->cq_ex) {
         perror("Failed to allocate PD or CQ");
         exit(1);
     }
 
-// Register memory regions
-#if USE_GDR == 0
-    rdma->buf1 = (char *)aligned_alloc(
-        4096, align_size(4096, MSG_SIZE ));
-    rdma->mr1 = ibv_reg_mr(rdma->pd, rdma->buf1, MSG_SIZE ,
-                           IBV_ACCESS_LOCAL_WRITE);
-#else
-    if (cudaMalloc(&rdma->local_buf, MSG_SIZE ) != cudaSuccess) {
+    if (cudaMalloc(&rdma->local_buf, MSG_SIZE) != cudaSuccess) {
         perror("Failed to allocate GPU memory");
         exit(1);
     }
-    rdma->mr = ibv_reg_mr(rdma->pd, rdma->local_buf, MSG_SIZE ,
-                           IBV_ACCESS_LOCAL_WRITE);
-#endif
+    rdma->mr = ibv_reg_mr(rdma->pd, rdma->local_buf, MSG_SIZE,
+                          IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    assert((uintptr_t)rdma->mr->addr == (uintptr_t)rdma->local_buf);
 
     if (!rdma->mr) {
         perror("Failed to register memory regions");
@@ -231,6 +183,110 @@ struct rdma_context *init_rdma() {
 
     rdma->qp = create_qp(rdma);
     return rdma;
+}
+
+// Create and configure a UD QP
+struct ibv_qp *create_qp(struct rdma_context *rdma) {
+    struct ibv_qp_init_attr_ex qp_attr_ex = {0};
+    struct efadv_qp_init_attr efa_attr = {0};
+
+    efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
+
+    qp_attr_ex.comp_mask =
+        IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+
+    qp_attr_ex.send_ops_flags =
+        IBV_QP_EX_WITH_RDMA_WRITE | IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
+
+    qp_attr_ex.cap.max_send_wr = 256;
+    qp_attr_ex.cap.max_recv_wr = 256;
+    qp_attr_ex.cap.max_send_sge = 1;
+    qp_attr_ex.cap.max_recv_sge = 1;
+
+    qp_attr_ex.cap.max_inline_data = 0;
+    qp_attr_ex.pd = rdma->pd;
+    qp_attr_ex.qp_context = rdma->ctx;
+    qp_attr_ex.sq_sig_all = 1;
+
+    qp_attr_ex.send_cq = ibv_cq_ex_to_cq(rdma->cq_ex);
+    qp_attr_ex.recv_cq = ibv_cq_ex_to_cq(rdma->cq_ex);
+
+    qp_attr_ex.qp_type = IBV_QPT_DRIVER;
+
+    struct ibv_qp *qp = efadv_create_qp_ex(rdma->ctx, &qp_attr_ex, &efa_attr,
+                                           sizeof(struct efadv_qp_init_attr));
+
+    if (!qp) {
+        perror("Failed to create QP");
+        exit(1);
+    }
+
+    struct ibv_qp_attr attr = {};
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_INIT;
+    attr.pkey_index = 0;
+    attr.port_num = PORT_NUM;
+    attr.qkey = QKEY;
+    if (ibv_modify_qp(
+            qp, &attr,
+            IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY)) {
+        perror("Failed to modify QP to INIT");
+        exit(1);
+    }
+
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTR;
+    if (ibv_modify_qp(qp, &attr, IBV_QP_STATE)) {
+        perror("Failed to modify QP to RTR");
+        exit(1);
+    }
+
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTS;
+    attr.sq_psn = 0x12345;  // Set initial Send Queue PSN
+    if (ibv_modify_qp(qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
+        perror("Failed to modify QP to RTS");
+        exit(1);
+    }
+
+    return qp;
+}
+
+// From
+// https://github.com/ofiwg/libfabric/blob/main/prov/efa/src/rdm/efa_rdm_cq.c#L424
+int poll_cq(struct rdma_context *rdma, int expect_opcode) {
+    int poll_count = 0;
+
+    /* Initialize an empty ibv_poll_cq_attr struct for ibv_start_poll.
+     * EFA expects .comp_mask = 0, or otherwise returns EINVAL.
+     */
+    struct ibv_poll_cq_attr poll_cq_attr = {.comp_mask = 0};
+    ssize_t err = ibv_start_poll(rdma->cq_ex, &poll_cq_attr);
+    bool should_end_poll = !err;
+    while (!err) {
+        if (rdma->cq_ex->status != IBV_WC_SUCCESS) {
+            printf("poll_cq: %s\n", ibv_wc_status_str(rdma->cq_ex->status));
+        }
+        std::ignore = rdma->cq_ex->wr_id;
+        int opcode = ibv_wc_read_opcode(rdma->cq_ex);
+        assert(opcode == expect_opcode);
+
+        if (expect_opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+            auto recvd_imm = ibv_wc_read_imm_data(rdma->cq_ex);
+            printf("Received immediate data: %x\n", recvd_imm);
+        }
+
+        /*
+         * ibv_next_poll MUST be call after the current WC is fully processed,
+         * which prevents later calls on ibv_cq_ex from reading the wrong WC.
+         */
+        poll_count++;
+        err = ibv_next_poll(rdma->cq_ex);
+    }
+
+    if (should_end_poll) ibv_end_poll(rdma->cq_ex);
+
+    return poll_count;
 }
 
 // Server: Post a receive and poll CQ
@@ -245,32 +301,31 @@ void run_server(struct rdma_context *rdma, int gid_index) {
 
     // Post receive buffer
     struct ibv_sge sge[1] = {
-        {(uintptr_t)rdma->local_buf, MSG_SIZE , rdma->mr->lkey}};
+        {(uintptr_t)rdma->local_buf, MSG_SIZE, rdma->mr->lkey}};
 
-    struct ibv_recv_wr wr = {}, *bad_wr;
+    struct ibv_recv_wr wr = {0}, *bad_wr;
     wr.wr_id = 1;
-    wr.num_sge = 0;
-    wr.sg_list = nullptr;
+    // This will let sender-side return "remote operation error"
+    wr.num_sge = 1;
+    wr.sg_list = sge;
+    // This will let sender-side hang
+    // wr.num_sge = 0;
+    // wr.sg_list = nullptr;
+    wr.next = NULL;
 
     if (ibv_post_recv(rdma->qp, &wr, &bad_wr)) {
         perror("Failed to post recv");
         exit(1);
     }
 
-    struct ibv_wc wc;
     printf("Server waiting for message...\n");
-    while (ibv_poll_cq(rdma->cq, 1, &wc) < 1);
+    while (poll_cq(rdma, IBV_WC_RECV_RDMA_WITH_IMM) < 1);
 
     // Only the first message is attached a hdr.
-#if USE_GDR == 0
-    printf("Server received: %s\n", rdma->local_buf);
-#else
     char *h_data = (char *)malloc(MSG_SIZE);
-    cudaMemcpy(h_data, rdma->local_buf, MSG_SIZE ,
-               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_data, rdma->local_buf, MSG_SIZE, cudaMemcpyDeviceToHost);
     printf("Server received: %s\n", h_data);
     free(h_data);
-#endif
 }
 
 // Client: Send message
@@ -289,23 +344,23 @@ void run_client(struct rdma_context *rdma, const char *server_ip,
     rdma->ah = create_ah(rdma, gid_index, remote_meta.gid);
 
     // prepare message
-#if USE_GDR == 0
-    strcpy(rdma->buf1, "Hello World!");
-#else
     char *h_data = (char *)malloc(MSG_SIZE);
     strcpy(h_data, "Hello World!");
     cudaMemcpy(rdma->local_buf, h_data, MSG_SIZE, cudaMemcpyHostToDevice);
-#endif
 
-    auto* qpx = ibv_qp_to_qp_ex(rdma->qp);
+    auto *qpx = ibv_qp_to_qp_ex(rdma->qp);
     ibv_wr_start(qpx);
 
     qpx->wr_id = 1;
     qpx->wr_flags = IBV_SEND_SIGNALED;
 
     ibv_wr_rdma_write_imm(qpx, remote_meta.rkey, remote_meta.addr, 0xdeadbeef);
-    ibv_wr_set_sge(qpx, rdma->mr->lkey, (uintptr_t)rdma->local_buf,
-                     MSG_SIZE);
+    // ibv_wr_rdma_write(qpx, remote_meta.rkey, remote_meta.addr);
+
+    struct ibv_sge sge[1] = {
+        {(uintptr_t)rdma->local_buf, MSG_SIZE, rdma->mr->lkey}};
+
+    ibv_wr_set_sge_list(qpx, 1, sge);
     ibv_wr_set_ud_addr(qpx, rdma->ah, remote_meta.qpn, QKEY);
 
     if (ibv_wr_complete(qpx)) {
@@ -316,16 +371,12 @@ void run_client(struct rdma_context *rdma, const char *server_ip,
 
     struct ibv_wc wc;
     printf("Client poll message completion...\n");
-    while (ibv_poll_cq(rdma->cq, 1, &wc) < 1);
+    while (poll_cq(rdma, IBV_WC_RDMA_WRITE) < 1);
 
-#if USE_GDR == 0
-    printf("Client sent: %s\n", rdma->local_buf);
-#else
     memset(h_data, 0, MSG_SIZE);
     cudaMemcpy(h_data, rdma->local_buf, MSG_SIZE, cudaMemcpyDeviceToHost);
     printf("Client sent: %s\n", h_data);
     free(h_data);
-#endif
 }
 
 int main(int argc, char *argv[]) {

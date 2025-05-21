@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -16,8 +17,9 @@
 #define PORT_NUM 1
 #define QKEY 0x12345
 #define MTU 8928
-#define MSG_SIZE 32
+#define MSG_SIZE 1024
 #define TCP_PORT 12345
+// #define USE_GPU
 
 struct rdma_context {
     struct ibv_context *ctx;
@@ -30,10 +32,6 @@ struct rdma_context {
     uint32_t remote_rkey;
     uint64_t remote_addr;
 };
-
-size_t align_size(size_t size, size_t alignment) {
-    return (size + alignment - 1) & ~(alignment - 1);
-}
 
 // Retrieve GID based on gid_index
 void get_gid(struct rdma_context *rdma, int gid_index, union ibv_gid *gid) {
@@ -48,15 +46,16 @@ void get_gid(struct rdma_context *rdma, int gid_index, union ibv_gid *gid) {
 // Create AH using specific GID index
 struct ibv_ah *create_ah(struct rdma_context *rdma, int gid_index,
                          union ibv_gid remote_gid) {
-    struct ibv_ah_attr ah_attr = {};
+    struct ibv_ah_attr ah_attr = {0};
 
-    ah_attr.is_global = 1;  // Enable Global Routing Header (GRH)
     ah_attr.port_num = PORT_NUM;
-    ah_attr.grh.sgid_index = gid_index;  // Use selected GID index
-    ah_attr.grh.dgid = remote_gid;       // Destination GID
-    ah_attr.grh.flow_label = 0;
-    ah_attr.grh.hop_limit = 255;
-    ah_attr.grh.traffic_class = 0;
+    ah_attr.is_global = 1;          // Enable Global Routing Header (GRH)
+    ah_attr.grh.dgid = remote_gid;  // Destination GID
+
+    // ah_attr.grh.sgid_index = gid_index;  // Use selected GID index
+    // ah_attr.grh.flow_label = 0;
+    // ah_attr.grh.hop_limit = 255;
+    // ah_attr.grh.traffic_class = 0;
 
     struct ibv_ah *ah = ibv_create_ah(rdma->pd, &ah_attr);
     if (!ah) {
@@ -135,13 +134,13 @@ void exchange_qpns(const char *peer_ip, metadata *local_meta,
 struct ibv_qp *create_qp(struct rdma_context *rdma);
 
 // Initialize RDMA resources
-struct rdma_context *init_rdma() {
+struct rdma_context *init_rdma(int gid_index) {
     struct rdma_context *rdma =
         (struct rdma_context *)calloc(1, sizeof(struct rdma_context));
 
     struct ibv_device **dev_list = ibv_get_device_list(NULL);
-    rdma->ctx = ibv_open_device(dev_list[0]);
-    printf("Using device: %s\n", ibv_get_device_name(dev_list[0]));
+    rdma->ctx = ibv_open_device(dev_list[gid_index]);
+    printf("Using device: %s\n", ibv_get_device_name(dev_list[gid_index]));
     ibv_free_device_list(dev_list);
     if (!rdma->ctx) {
         perror("Failed to open device");
@@ -168,18 +167,33 @@ struct rdma_context *init_rdma() {
         exit(1);
     }
 
+#ifdef USE_GPU
     if (cudaMalloc(&rdma->local_buf, MSG_SIZE) != cudaSuccess) {
         perror("Failed to allocate GPU memory");
         exit(1);
     }
     rdma->mr = ibv_reg_mr(rdma->pd, rdma->local_buf, MSG_SIZE,
-                          IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
-    assert((uintptr_t)rdma->mr->addr == (uintptr_t)rdma->local_buf);
+                          IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
+                              IBV_ACCESS_REMOTE_READ);
+#else
+    if (posix_memalign((void **)&rdma->local_buf, sysconf(_SC_PAGESIZE),
+                       MSG_SIZE)) {
+        perror("Failed to allocate local buffer");
+        exit(1);
+    }
+    rdma->mr = ibv_reg_mr(rdma->pd, rdma->local_buf, MSG_SIZE,
+                          IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
+                              IBV_ACCESS_REMOTE_READ);
+#endif
 
     if (!rdma->mr) {
         perror("Failed to register memory regions");
         exit(1);
     }
+    assert((uintptr_t)rdma->mr->addr == (uintptr_t)rdma->local_buf);
+
+    printf("RX MR: addr=%p, len=%zu, lkey=0x%x, rkey=0x%x\n", rdma->mr->addr,
+           rdma->mr->length, rdma->mr->lkey, rdma->mr->rkey);
 
     rdma->qp = create_qp(rdma);
     return rdma;
@@ -190,20 +204,18 @@ struct ibv_qp *create_qp(struct rdma_context *rdma) {
     struct ibv_qp_init_attr_ex qp_attr_ex = {0};
     struct efadv_qp_init_attr efa_attr = {0};
 
-    efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
-
     qp_attr_ex.comp_mask =
         IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
-
-    qp_attr_ex.send_ops_flags =
-        IBV_QP_EX_WITH_RDMA_WRITE | IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
+    qp_attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE |
+                                IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM |
+                                IBV_QP_EX_WITH_RDMA_READ;
 
     qp_attr_ex.cap.max_send_wr = 256;
     qp_attr_ex.cap.max_recv_wr = 256;
     qp_attr_ex.cap.max_send_sge = 1;
     qp_attr_ex.cap.max_recv_sge = 1;
-
     qp_attr_ex.cap.max_inline_data = 0;
+
     qp_attr_ex.pd = rdma->pd;
     qp_attr_ex.qp_context = rdma->ctx;
     qp_attr_ex.sq_sig_all = 1;
@@ -212,6 +224,10 @@ struct ibv_qp *create_qp(struct rdma_context *rdma) {
     qp_attr_ex.recv_cq = ibv_cq_ex_to_cq(rdma->cq_ex);
 
     qp_attr_ex.qp_type = IBV_QPT_DRIVER;
+
+    efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
+#define EFA_QP_LOW_LATENCY_SERVICE_LEVEL 8
+    efa_attr.sl = EFA_QP_LOW_LATENCY_SERVICE_LEVEL;
 
     struct ibv_qp *qp = efadv_create_qp_ex(rdma->ctx, &qp_attr_ex, &efa_attr,
                                            sizeof(struct efadv_qp_init_attr));
@@ -243,8 +259,10 @@ struct ibv_qp *create_qp(struct rdma_context *rdma) {
 
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTS;
-    attr.sq_psn = 0x12345;  // Set initial Send Queue PSN
-    if (ibv_modify_qp(qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
+#define EFA_RDM_DEFAULT_RNR_RETRY (3)
+    attr.rnr_retry = EFA_RDM_DEFAULT_RNR_RETRY;  // Set RNR retry count
+    if (ibv_modify_qp(qp, &attr,
+                      IBV_QP_STATE | IBV_QP_SQ_PSN | IBV_QP_RNR_RETRY)) {
         perror("Failed to modify QP to RTS");
         exit(1);
     }
@@ -269,7 +287,12 @@ int poll_cq(struct rdma_context *rdma, int expect_opcode) {
         }
         std::ignore = rdma->cq_ex->wr_id;
         int opcode = ibv_wc_read_opcode(rdma->cq_ex);
-        assert(opcode == expect_opcode);
+        // assert(opcode == expect_opcode);
+
+        if (opcode != expect_opcode) {
+            printf("Unexpected opcode: %d\n", opcode);
+            break;
+        }
 
         if (expect_opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
             auto recvd_imm = ibv_wc_read_imm_data(rdma->cq_ex);
@@ -299,6 +322,15 @@ void run_server(struct rdma_context *rdma, int gid_index) {
 
     exchange_qpns(NULL, &local_meta, &remote_meta);
 
+#ifdef USE_GPU
+    // prepare message
+    char *h_data = (char *)malloc(MSG_SIZE);
+    strcpy(h_data, "World Hello!");
+    cudaMemcpy(rdma->local_buf, h_data, MSG_SIZE, cudaMemcpyHostToDevice);
+#else
+    strcpy(rdma->local_buf, "World Hello!");
+#endif
+
     // Post receive buffer
     struct ibv_sge sge[1] = {
         {(uintptr_t)rdma->local_buf, MSG_SIZE, rdma->mr->lkey}};
@@ -321,11 +353,15 @@ void run_server(struct rdma_context *rdma, int gid_index) {
     printf("Server waiting for message...\n");
     while (poll_cq(rdma, IBV_WC_RECV_RDMA_WITH_IMM) < 1);
 
+#ifdef USE_GPU
     // Only the first message is attached a hdr.
     char *h_data = (char *)malloc(MSG_SIZE);
     cudaMemcpy(h_data, rdma->local_buf, MSG_SIZE, cudaMemcpyDeviceToHost);
     printf("Server received: %s\n", h_data);
     free(h_data);
+#else
+    printf("Server received: %s\n", rdma->local_buf);
+#endif
 }
 
 // Client: Send message
@@ -343,22 +379,28 @@ void run_client(struct rdma_context *rdma, const char *server_ip,
 
     rdma->ah = create_ah(rdma, gid_index, remote_meta.gid);
 
+#ifdef USE_GPU
     // prepare message
     char *h_data = (char *)malloc(MSG_SIZE);
     strcpy(h_data, "Hello World!");
     cudaMemcpy(rdma->local_buf, h_data, MSG_SIZE, cudaMemcpyHostToDevice);
+#else
+    strcpy(rdma->local_buf, "Hello World!");
+#endif
 
     auto *qpx = ibv_qp_to_qp_ex(rdma->qp);
     ibv_wr_start(qpx);
 
     qpx->wr_id = 1;
+    qpx->comp_mask = 0;
     qpx->wr_flags = IBV_SEND_SIGNALED;
 
-    ibv_wr_rdma_write_imm(qpx, remote_meta.rkey, remote_meta.addr, 0xdeadbeef);
+    ibv_wr_rdma_write_imm(qpx, remote_meta.rkey, remote_meta.addr, 0x2);
     // ibv_wr_rdma_write(qpx, remote_meta.rkey, remote_meta.addr);
+    // ibv_wr_rdma_read(qpx, remote_meta.rkey, remote_meta.addr);
 
     struct ibv_sge sge[1] = {
-        {(uintptr_t)rdma->local_buf, MSG_SIZE, rdma->mr->lkey}};
+        {(uintptr_t)rdma->local_buf, MSG_SIZE / 2, rdma->mr->lkey}};
 
     ibv_wr_set_sge_list(qpx, 1, sge);
     ibv_wr_set_ud_addr(qpx, rdma->ah, remote_meta.qpn, QKEY);
@@ -372,15 +414,20 @@ void run_client(struct rdma_context *rdma, const char *server_ip,
     struct ibv_wc wc;
     printf("Client poll message completion...\n");
     while (poll_cq(rdma, IBV_WC_RDMA_WRITE) < 1);
+    // while (poll_cq(rdma, IBV_WC_RDMA_READ) < 1);
 
+#ifdef USE_GPU
     memset(h_data, 0, MSG_SIZE);
     cudaMemcpy(h_data, rdma->local_buf, MSG_SIZE, cudaMemcpyDeviceToHost);
     printf("Client sent: %s\n", h_data);
     free(h_data);
+#else
+    printf("Client sent: %s\n", rdma->local_buf);
+#endif
 }
 
 int main(int argc, char *argv[]) {
-    struct rdma_context *rdma = init_rdma();
+    struct rdma_context *rdma = init_rdma(GID_INDEX);
 
     if (argc == 2)
         run_client(rdma, argv[1], GID_INDEX);

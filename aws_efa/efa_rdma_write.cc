@@ -67,8 +67,8 @@ struct ibv_ah *create_ah(struct rdma_context *rdma, int gid_index,
 
 struct metadata {
     uint32_t qpn;
-    union ibv_gid gid;
     uint32_t rkey;
+    union ibv_gid gid;
     uint64_t addr;
 };
 
@@ -228,6 +228,7 @@ struct ibv_qp *create_qp(struct rdma_context *rdma) {
     efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
 #define EFA_QP_LOW_LATENCY_SERVICE_LEVEL 8
     efa_attr.sl = EFA_QP_LOW_LATENCY_SERVICE_LEVEL;
+    efa_attr.flags |= EFADV_QP_FLAGS_UNSOLICITED_WRITE_RECV;
 
     struct ibv_qp *qp = efadv_create_qp_ex(rdma->ctx, &qp_attr_ex, &efa_attr,
                                            sizeof(struct efadv_qp_init_attr));
@@ -322,6 +323,8 @@ void run_server(struct rdma_context *rdma, int gid_index) {
 
     exchange_qpns(NULL, &local_meta, &remote_meta);
 
+    rdma->ah = create_ah(rdma, gid_index, remote_meta.gid);
+
 #ifdef USE_GPU
     // prepare message
     char *h_data = (char *)malloc(MSG_SIZE);
@@ -392,8 +395,8 @@ void run_client(struct rdma_context *rdma, const char *server_ip,
     ibv_wr_start(qpx);
 
     qpx->wr_id = 1;
-    qpx->comp_mask = 0;
-    qpx->wr_flags = IBV_SEND_SIGNALED;
+    // qpx->comp_mask = 0;
+    // qpx->wr_flags = IBV_SEND_SIGNALED;
 
     ibv_wr_rdma_write_imm(qpx, remote_meta.rkey, remote_meta.addr, 0x2);
     // ibv_wr_rdma_write(qpx, remote_meta.rkey, remote_meta.addr);

@@ -1891,6 +1891,25 @@ ConnID Endpoint::uccl_connect(int local_vdev, int remote_vdev,
     return conn_id;
 }
 
+struct UcclPeer {
+    int local_vdev;
+    int remote_vdev;
+    std::string remote_ip;
+
+    struct hash {
+        size_t operator()(const UcclPeer &peer) const {
+            return std::hash<int>()(peer.local_vdev) ^ std::hash<int>()(peer.remote_vdev) ^ std::hash<std::string>()(peer.remote_ip);
+        }
+    };
+
+    bool operator==(const UcclPeer &other) const {
+        return local_vdev == other.local_vdev && remote_vdev == other.remote_vdev && remote_ip == other.remote_ip;
+    }
+
+    UcclPeer(int local_vdev, int remote_vdev, std::string remote_ip) : local_vdev(local_vdev), remote_vdev(remote_vdev), remote_ip(remote_ip) {}
+};
+static std::unordered_map<UcclPeer, bool, UcclPeer::hash> flip_map;
+
 ConnID Endpoint::uccl_accept(int local_vdev, int *remote_vdev,
                              std::string &remote_ip, int listen_fd) {
     struct sockaddr_in cli_addr;
@@ -1916,9 +1935,26 @@ ConnID Endpoint::uccl_accept(int local_vdev, int *remote_vdev,
     // Generate unique flow ID for both client and server.
     FlowID flow_id;
     while (true) {
-        // generate flow_id sequentially for better debugging
-        static std::atomic<uint64_t> base_flow_id = 0;
-        flow_id = base_flow_id++;
+        static std::atomic<uint64_t> base_flow_id_odd = 1;
+        static std::atomic<uint64_t> base_flow_id_even = 0;
+
+        // This can help load balance traffic between 2 NICs.
+        if (flip_map.find(UcclPeer(local_vdev, *remote_vdev, remote_ip)) == flip_map.end()) {
+            flip_map[UcclPeer(local_vdev, *remote_vdev, remote_ip)] = false;
+            flow_id = base_flow_id_odd;
+            std::atomic_fetch_add(&base_flow_id_odd, 2);
+        } else {
+            if (flip_map[UcclPeer(local_vdev, *remote_vdev, remote_ip)]) {
+                flip_map[UcclPeer(local_vdev, *remote_vdev, remote_ip)] = false;
+                flow_id = base_flow_id_odd;
+                std::atomic_fetch_add(&base_flow_id_odd, 2);
+            } else {
+                flip_map[UcclPeer(local_vdev, *remote_vdev, remote_ip)] = true;
+                flow_id = base_flow_id_even;
+                std::atomic_fetch_add(&base_flow_id_even, 2);
+            }
+        }
+
         bool unique;
         {
             std::lock_guard<std::mutex> lock(fd_map_mu_);

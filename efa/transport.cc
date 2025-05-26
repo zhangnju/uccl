@@ -157,7 +157,7 @@ RXTracking::ConsumeRet RXTracking::consume_rdma_write(UcclFlow *flow, FrameDesc 
     const auto expected_seqno = pcb->rcv_nxt;
 
     if (swift::seqno_lt(seqno, expected_seqno)) {
-        DCHECK(false) << "Received old packet: " << seqno << " < " << expected_seqno;
+        VLOG(3) << "Received old packet: " << seqno << " < " << expected_seqno;
         socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
         socket_->push_frame_desc((uint64_t)msgbuf);
         return kOldPkt;
@@ -165,7 +165,7 @@ RXTracking::ConsumeRet RXTracking::consume_rdma_write(UcclFlow *flow, FrameDesc 
 
     const size_t distance = seqno - expected_seqno;
     if (distance >= kReassemblyMaxSeqnoDistance) {
-        DCHECK(false) << "Packet too far ahead. Dropping as we can't handle SACK. "
+        VLOG(3) << "Packet too far ahead. Dropping as we can't handle SACK. "
                 << "seqno: " << seqno << ", expected: " << expected_seqno;
         socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
         socket_->push_frame_desc((uint64_t)msgbuf);
@@ -177,18 +177,18 @@ RXTracking::ConsumeRet RXTracking::consume_rdma_write(UcclFlow *flow, FrameDesc 
     if (seqno != expected_seqno) {
         it = reass_q_.lower_bound(seqno);
         if (it != reass_q_.end() && it->first == seqno) {
-            DCHECK(false) << "Received duplicate packet: " << seqno;
+            VLOG(3) << "Received duplicate packet: " << seqno;
             // Duplicate packet. Drop it.
             socket_->push_pkt_hdr(msgbuf->get_pkt_hdr_addr());
             socket_->push_frame_desc((uint64_t)msgbuf);
             return kOOOTrackableDup;
         }
         VLOG(3) << "Received OOO trackable packet: " << seqno
-                << " payload_len: " << frame_len - kUcclPktHdrLen
+                << " payload_len: " << frame_len
                 << " reass_q size " << reass_q_.size();
     } else {
         VLOG(3) << "Received expected packet: " << seqno
-                << " payload_len: " << frame_len - kUcclPktHdrLen;
+                << " payload_len: " << frame_len;
     }
 
     num_unconsumed_msgbufs_++;
@@ -286,16 +286,25 @@ void RXTracking::push_inorder_msgbuf_to_app(swift::Pcb *pcb) {
         auto *msgbuf = reass_q_.begin()->second;
         reass_q_.erase(reass_q_.begin());
 
+        deser_msg_len_ += msgbuf->get_pkt_data_len();
+
         #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
         if (msgbuf->is_last()) {
-            // wakeup the app thread waiting on endpoint.
-            auto *poll_ctx = (PollCtx *)msgbuf->get_poll_ctx();
+            // Wakeup the app thread waiting on endpoint.
+            DCHECK(!app_buf_queue_.empty());
+            auto &[rx_copy_work] = app_buf_queue_.front();
+            app_buf_queue_.pop_front();
+            *rx_copy_work.len_p = deser_msg_len_;
+            auto *poll_ctx = rx_copy_work.poll_ctx;
+            DCHECK(poll_ctx != nullptr);
             if (--(poll_ctx->num_unfinished) == 0) {
                 poll_ctx->write_barrier();
                 std::lock_guard<std::mutex> lock(poll_ctx->mu);
                 poll_ctx->done = true;
                 poll_ctx->cv.notify_one();
             }
+
+            deser_msg_len_ = 0;
         }
         socket_->push_frame_desc((uint64_t)msgbuf);
 
@@ -315,7 +324,11 @@ void UcclFlow::post_rx_appbuf_ctrl(Channel::Msg *rx_work)
 {
     DCHECK(rx_work->opcode == Channel::Msg::kRx);
 
+    #ifdef CONN_SPLIT
+    auto *mr = rx_work->mhandle->mr[rx_work->pdev_offset / (kNumEnginesPerVdev / kBundleNIC)];
+    #else
     auto *mr = rx_work->mhandle->mr[rx_work->pdev_offset];
+    #endif
 
     // Use ctrl qp to send r_info to peer.
     auto rand_ctrl_path_id = std::rand() % kMaxPathCtrl;
@@ -333,8 +346,8 @@ void UcclFlow::post_rx_appbuf_ctrl(Channel::Msg *rx_work)
     r_info->rx_buff_len = be32_t(rx_work->len);
     r_info->flow_id = be64_t(peer_flow_id_);
 
-    printf("post_rx_appbuf_ctrl: remote_addr: %lu, remote_rkey: %d, rx_buff_len: %d, flow_id: %ld\n", 
-        r_info->remote_addr.value(), r_info->remote_rkey.value(), r_info->rx_buff_len.value(), r_info->flow_id.value());
+    // printf("post_rx_appbuf_ctrl: remote_addr: %lu, remote_rkey: %d, rx_buff_len: %d, flow_id: %ld\n", 
+    //     r_info->remote_addr.value(), r_info->remote_rkey.value(), r_info->rx_buff_len.value(), r_info->flow_id.value());
 
     DCHECK(msgbuf->get_pkt_data_len() == 0);
 
@@ -342,6 +355,8 @@ void UcclFlow::post_rx_appbuf_ctrl(Channel::Msg *rx_work)
     msgbuf->set_dest_qpn(remote_meta_->qpn_list_ctrl[dst_qp_idx]);
 
     socket_->post_send_wr(msgbuf, src_qp_idx);
+
+    rx_tracking_.app_buf_queue_.push_back({*rx_work});
 }
 
 #ifdef SCATTERED_MEMCPY

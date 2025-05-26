@@ -57,12 +57,30 @@ struct Pcb {
     uint16_t rto_rexmits_consectutive{0};
     uint32_t fast_recovers{0};
 
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+    uint16_t seqno() const { return snd_nxt; }
+    uint16_t get_snd_nxt() {
+        uint16_t seqno = snd_nxt;
+        snd_nxt++;
+        return seqno;
+    }
+    uint16_t ackno() const { return rcv_nxt; }
+    uint16_t get_rcv_nxt() const { return rcv_nxt; }
+    
+    #else
+    
     uint32_t seqno() const { return snd_nxt; }
     uint32_t get_snd_nxt() {
         uint32_t seqno = snd_nxt;
         snd_nxt++;
         return seqno;
     }
+    uint32_t ackno() const { return rcv_nxt; }
+    uint32_t get_rcv_nxt() const { return rcv_nxt; }
+    
+    #endif
+
+    void advance_rcv_nxt() { rcv_nxt++; }
 
     std::string to_string() const {
         std::string s;
@@ -74,10 +92,6 @@ struct Pcb {
              ", rto_rexmits: " + std::to_string(rto_rexmits);
         return s;
     }
-
-    uint32_t ackno() const { return rcv_nxt; }
-    uint32_t get_rcv_nxt() const { return rcv_nxt; }
-    void advance_rcv_nxt() { rcv_nxt++; }
 
     /************* RTO related *************/
     struct wheel_ent_t {

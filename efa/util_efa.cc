@@ -237,8 +237,24 @@ EFASocket::EFASocket(int gpu_idx, int pdev_idx, int socket_idx)
     frame_desc_pool_ = new FrameDescBuffPool();
 
     // Create completion queue.
-    send_cq_ = ibv_create_cq(context_, kMaxCqeTotal, NULL, NULL, 0);
-    recv_cq_ = ibv_create_cq(context_, kMaxCqeTotal, NULL, NULL, 0);
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+    struct ibv_cq_init_attr_ex init_attr_ex = {
+        .cqe = kMaxCqeTotal,
+        .cq_context = nullptr,
+        .channel = nullptr,
+        .comp_vector = 0,
+        /* EFA requires these values for wc_flags and comp_mask.
+         * See `efa_create_cq_ex` in rdma-core.
+         */
+        .wc_flags = IBV_WC_STANDARD_FLAGS,
+        .comp_mask = 0,
+    };
+    send_cq_ = ibv_create_cq_ex(context_, &init_attr_ex);
+    recv_cq_ = ibv_create_cq_ex(context_, &init_attr_ex);
+    #else
+    send_cq_ = ibv_create_cq(context_, kMaxCqeTotal, nullptr, nullptr, 0);
+    recv_cq_ = ibv_create_cq(context_, kMaxCqeTotal, nullptr, nullptr, 0);
+    #endif
     DCHECK(send_cq_ && recv_cq_) << "Failed to allocate send/recv_cq_";
 
     auto create_qp_func = &EFASocket::create_qp;
@@ -253,17 +269,20 @@ EFASocket::EFASocket(int gpu_idx, int pdev_idx, int socket_idx)
 
     // Create send/recv QPs.
     for (int i = 0; i < kMaxSrcDstQP; i++) {
+        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+        qp_list_[i] =
+            (this->*create_qp_func)(ibv_cq_ex_to_cq(send_cq_), ibv_cq_ex_to_cq(recv_cq_), kMaxSendWr, kMaxRecvWr);
+        post_recv_rdma_write_wrs(i);
+        qp_num_to_idx_[qp_list_[i]->qp_num] = i;
+        #else
         qp_list_[i] =
             (this->*create_qp_func)(send_cq_, recv_cq_, kMaxSendWr, kMaxRecvWr);
-        #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
-        post_recv_rdma_write_wrs(kMaxRecvWr, i);
-        #else
         post_recv_wrs(kMaxRecvWr, i);
         #endif
     }
 
     // Create QP for ACK packets.
-    ctrl_cq_ = ibv_create_cq(context_, kMaxCqeTotal, NULL, NULL, 0);
+    ctrl_cq_ = ibv_create_cq(context_, kMaxCqeTotal, nullptr, nullptr, 0);
     DCHECK(ctrl_cq_) << "Failed to allocate ctrl CQ";
 
 #ifdef USE_SRD_FOR_CTRL
@@ -339,8 +358,6 @@ struct ibv_qp *EFASocket::create_srd_qp_ex(struct ibv_cq *send_cq,
     struct ibv_qp_init_attr_ex qp_attr_ex = {};
     struct efadv_qp_init_attr efa_attr = {};
     
-    efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
-    
     qp_attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
 
     qp_attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
@@ -349,8 +366,8 @@ struct ibv_qp *EFASocket::create_srd_qp_ex(struct ibv_cq *send_cq,
     qp_attr_ex.cap.max_recv_wr = recv_cq_size; 
     qp_attr_ex.cap.max_send_sge = 1;
     qp_attr_ex.cap.max_recv_sge = 1;
-
 	qp_attr_ex.cap.max_inline_data = 0;
+
 	qp_attr_ex.pd = pd_;
 	qp_attr_ex.qp_context = context_;
 	qp_attr_ex.sq_sig_all = 1;
@@ -359,6 +376,14 @@ struct ibv_qp *EFASocket::create_srd_qp_ex(struct ibv_cq *send_cq,
 	qp_attr_ex.recv_cq = recv_cq;
 
     qp_attr_ex.qp_type = IBV_QPT_DRIVER;
+
+    efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
+    #define EFA_QP_LOW_LATENCY_SERVICE_LEVEL 8
+    efa_attr.sl = EFA_QP_LOW_LATENCY_SERVICE_LEVEL;
+    efa_attr.flags = 0;
+    // If set, Receive WRs will not be consumed for RDMA write with imm.
+    // Zhongjie: if not set, sender cannot poll the completion of RDMA write with imm.
+    efa_attr.flags |= EFADV_QP_FLAGS_UNSOLICITED_WRITE_RECV;
 
     struct ibv_qp *qp = efadv_create_qp_ex(
 			context_, &qp_attr_ex, &efa_attr,
@@ -523,12 +548,14 @@ uint32_t EFASocket::post_rdma_write_wrs(std::vector<FrameDesc *> &frames,
         frame->set_src_qp_idx(src_qp_idx);
 
         qpx->wr_id = (uint64_t)frame;
+        qpx->comp_mask = 0;
         qpx->wr_flags = IBV_SEND_SIGNALED;
 
         ibv_wr_rdma_write_imm(qpx, frame->get_remote_rkey(), frame->get_remote_addr(), htobe32(frame->get_imm_data()));
-        printf("ibv_wr_rdma_write_imm, rkey: %d, addr: %lu, imm: %d\n", frame->get_remote_rkey(), frame->get_remote_addr(), frame->get_imm_data());
         ibv_wr_set_sge(qpx, frame->get_pkt_data_lkey_tx(), frame->get_pkt_data_addr(), frame->get_pkt_data_len());
-        printf("ibv_wr_set_sge, lkey: %d, addr: %lu, len: %d\n", frame->get_pkt_data_lkey_tx(), frame->get_pkt_data_addr(), frame->get_pkt_data_len());
+        
+        // printf("ibv_wr_rdma_write_imm, rkey: %d, addr: %lu, imm: %d\n", frame->get_remote_rkey(), frame->get_remote_addr(), frame->get_imm_data());
+        // printf("ibv_wr_set_sge, lkey: %d, addr: %lu, len: %d\n", frame->get_pkt_data_lkey_tx(), frame->get_pkt_data_addr(), frame->get_pkt_data_len());
 
         ibv_wr_set_ud_addr(qpx, frame->get_dest_ah(), frame->get_dest_qpn(), QKEY);
 
@@ -664,49 +691,25 @@ uint32_t EFASocket::post_send_wrs_for_ctrl(std::vector<FrameDesc *> &frames,
     return frames.size();
 }
 
-void EFASocket::post_recv_rdma_write_wrs(uint32_t budget, uint16_t qp_idx)
+void EFASocket::post_recv_rdma_write_wrs(uint16_t qp_idx)
 {
     DCHECK(qp_idx < kMaxSrcDstQP);
-    auto &deficit_cnt = deficit_cnt_recv_wrs_[qp_idx];
-    deficit_cnt += budget;
-    if (deficit_cnt < kMaxRecvWrDeficit) return;
-
-    int ret;
-    uint64_t frame_desc_buf;
     auto *qp = qp_list_[qp_idx];
 
-    auto *wr_head = &recv_wr_vec_[0];
-    for (int i = 0; i < deficit_cnt; i++) {
-        ret = frame_desc_pool_->alloc_buff(&frame_desc_buf);
-        DCHECK(ret == 0)  << frame_desc_pool_->avail_slots();
+    auto *wr = &recv_wr_vec_[0];
 
-        auto *frame_desc = FrameDesc::Create(
-            frame_desc_buf, 0, 0, 0, 0, 0, 0);
-        frame_desc->set_src_qp_idx(qp_idx);
+    wr->num_sge = 0;
+    wr->sg_list = nullptr;
+    wr->next = nullptr;
 
-        auto *wr = &recv_wr_vec_[i % kMaxChainedWr];
-
-        wr->wr_id = (uint64_t)frame_desc;
-        wr->num_sge = 0;
-        wr->sg_list = nullptr;
-
-        bool is_last = (i + 1) % kMaxChainedWr == 0 || (i + 1) == deficit_cnt;
-        wr->next = is_last ? nullptr : &recv_wr_vec_[(i + 1) % kMaxChainedWr];
-
-        if (is_last) {
-            struct ibv_recv_wr *bad_wr;
-            // Post receive buffer
-            if (ibv_post_recv(qp, wr_head, &bad_wr)) {
-                perror("post_recv_rdma_write_wrs: Failed to post recv");
-                exit(1);
-            }
-            if (i + 1 != deficit_cnt)
-                wr_head = &recv_wr_vec_[(i + 1) % kMaxChainedWr];
-        }
+    struct ibv_recv_wr *bad_wr;
+    // Post receive buffer
+    if (ibv_post_recv(qp, wr, &bad_wr)) {
+        perror("post_recv_rdma_write_wrs: Failed to post recv");
+        exit(1);
     }
 
-    recv_queue_wrs_ += deficit_cnt;
-    deficit_cnt = 0;
+    recv_queue_wrs_ += 1;
 }
 
 void EFASocket::post_recv_wrs(uint32_t budget, uint16_t qp_idx) {
@@ -818,6 +821,97 @@ void EFASocket::post_recv_wrs_for_ctrl(uint32_t budget, uint16_t qp_idx) {
     deficit_cnt = 0;
 }
 
+#if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+std::vector<FrameDesc *> EFASocket::poll_send_cq() {
+    std::vector<FrameDesc *> frames;
+
+    // Don't bother polling CQ.
+    if (send_queue_wrs_ == 0) return frames;
+
+    auto budget_use = 0;
+
+    auto *cq_ex = send_cq_;
+    struct ibv_poll_cq_attr poll_cq_attr = {.comp_mask = 0};
+    auto ret = ibv_start_poll(cq_ex, &poll_cq_attr);
+
+    if (ret) return frames;
+
+    while (1) {
+        auto now = rdtsc();
+        DCHECK(cq_ex->status == IBV_WC_SUCCESS) << "cq_ex->status: " << cq_ex->status;
+        auto opcode = ibv_wc_read_opcode(cq_ex);
+        DCHECK(opcode == IBV_WC_RDMA_WRITE) << "opcode: " << opcode;
+
+        auto *frame = (FrameDesc *)(cq_ex->wr_id);
+        DCHECK(frame != nullptr);
+        auto src_qp_idx = frame->get_src_qp_idx();
+        send_queue_wrs_per_qp_[src_qp_idx]--;
+        send_queue_wrs_--;
+
+        frame->set_cpe_time_tsc(now);
+
+        // printf("poll_send_cq: frame %p\n", frame);
+
+        #if defined(USE_SRD) && !defined(SRD_USE_ACK)
+        frames.push_back(frame);
+        #endif
+        
+        // Exit if we have enough frames.
+        if (budget_use >= 1.25 * kMaxPollBatch) break;
+        // Exit if we have no more cqes.
+        ret = ibv_next_poll(cq_ex);
+        if (ret) break;
+    }
+
+    ibv_end_poll(cq_ex);
+
+    return frames;
+}
+std::vector<FrameDesc *> EFASocket::poll_send_cq(uint32_t budget) {
+    std::vector<FrameDesc *> frames;
+
+    // Don't bother polling CQ.
+    if (send_queue_wrs_ == 0) return frames;
+
+    auto budget_use = 0;
+
+    auto *cq_ex = send_cq_;
+    struct ibv_poll_cq_attr poll_cq_attr = {.comp_mask = 0};
+    auto ret = ibv_start_poll(cq_ex, &poll_cq_attr);
+
+    if (ret) return frames;
+
+    while (1) {
+        auto now = rdtsc();
+        DCHECK(cq_ex->status == IBV_WC_SUCCESS);
+        auto opcode = ibv_wc_read_opcode(cq_ex);
+        DCHECK(opcode == IBV_WC_RDMA_WRITE);
+
+        auto *frame = (FrameDesc *)(cq_ex->wr_id);
+        DCHECK(frame != nullptr);
+        auto src_qp_idx = frame->get_src_qp_idx();
+        send_queue_wrs_per_qp_[src_qp_idx]--;
+        send_queue_wrs_--;
+
+        frame->set_cpe_time_tsc(now);
+
+        #if defined(USE_SRD) && !defined(SRD_USE_ACK)
+        frames.push_back(frame);
+        #endif
+        
+        // Exit if we have enough frames.
+        if (budget_use >= budget) break;
+        // Exit if we have no more cqes.
+        ret = ibv_next_poll(cq_ex);
+        if (ret) break;
+    }
+
+    ibv_end_poll(cq_ex);
+
+    return frames;
+}
+
+#else
 std::vector<FrameDesc *> EFASocket::poll_send_cq() {
     std::vector<FrameDesc *> frames;
 
@@ -855,7 +949,6 @@ std::vector<FrameDesc *> EFASocket::poll_send_cq() {
 
     return frames;
 }
-
 std::vector<FrameDesc *> EFASocket::poll_send_cq(uint32_t budget) {
     std::vector<FrameDesc *> frames;
 
@@ -890,7 +983,59 @@ std::vector<FrameDesc *> EFASocket::poll_send_cq(uint32_t budget) {
     send_queue_wrs_ -= frames.size();
     return frames;
 }
+#endif
 
+#if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+std::vector<FrameDesc *> EFASocket::poll_recv_cq(uint32_t budget) {
+    
+    std::vector<FrameDesc *> frames;
+    struct ibv_poll_cq_attr poll_cq_attr = {.comp_mask = 0};
+    auto *cq_ex = recv_cq_;
+    auto ret = ibv_start_poll(cq_ex, &poll_cq_attr);
+    if (ret) return frames;
+    while (1) {
+        auto now = rdtsc();
+        DCHECK(cq_ex->status == IBV_WC_SUCCESS) 
+            << "poll_recv_cq_ex: completion error: "
+            << ibv_wc_status_str(cq_ex->status);
+        
+        auto opcode = ibv_wc_read_opcode(cq_ex);
+        DCHECK(opcode == IBV_WC_RECV_RDMA_WITH_IMM) << "opcode: " << opcode;
+
+        auto imm_data = ibv_wc_read_imm_data(cq_ex);
+        auto byte_len = ibv_wc_read_byte_len(cq_ex);
+        
+        uint64_t frame_buf;
+        ret = frame_desc_pool_->alloc_buff(&frame_buf);
+        DCHECK(ret == 0)  << frame_desc_pool_->avail_slots();
+        auto *frame = FrameDesc::Create(
+            frame_buf, 0, 0, 0, 0, 0, 0);
+        frame->set_src_qp_idx(qp_num_to_idx_[ibv_wc_read_qp_num(cq_ex)]);
+
+        frame->set_cpe_time_tsc(now);
+
+        frame->set_imm_data(be32toh(imm_data));
+        frame->set_pkt_data_len(byte_len);
+        frame->set_msg_flags(0);
+        frame->mark_write();
+
+        frames.push_back(frame);
+
+        in_packets_++;
+        in_bytes_ += byte_len;
+
+        // Exit if we have enough frames.
+        if (frames.size() >= budget) break;
+        // Exit if we have no more cqes.
+        ret = ibv_next_poll(cq_ex);
+        if (ret) break;
+    }
+
+    ibv_end_poll(cq_ex);
+
+    return frames;
+}
+#else
 std::vector<FrameDesc *> EFASocket::poll_recv_cq(uint32_t budget) {
     std::vector<FrameDesc *> frames;
 
@@ -905,32 +1050,16 @@ std::vector<FrameDesc *> EFASocket::poll_recv_cq(uint32_t budget) {
                 << "poll_recv_cq: completion error: "
                 << ibv_wc_status_str(wc_[i].status);
 
-            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
-            DCHECK(wc_[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM);
-            printf("poll_recv_cq: IBV_WC_RECV_RDMA_WITH_IMM\n");
-            #else
             DCHECK(wc_[i].opcode == IBV_WC_RECV);
-            #endif
 
             auto *frame = (FrameDesc *)wc_[i].wr_id;
             frame->set_cpe_time_tsc(now);
-
-            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
-            frame->set_imm_data(be32toh(wc_[i].imm_data));
-            frame->set_pkt_data_len(wc_[i].byte_len);
-            frame->set_msg_flags(0);
-            frame->mark_write();
-            #endif
 
             frames.push_back(frame);
 
             auto src_qp_idx = frame->get_src_qp_idx();
 
-            #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
-            post_recv_rdma_write_wrs(1, src_qp_idx);
-            #else
             post_recv_wrs(1, src_qp_idx);
-            #endif
 
             in_packets_++;
             in_bytes_ += wc_[i].byte_len;
@@ -943,6 +1072,7 @@ std::vector<FrameDesc *> EFASocket::poll_recv_cq(uint32_t budget) {
     recv_queue_wrs_ -= frames.size();
     return frames;
 }
+#endif
 
 std::tuple<std::vector<FrameDesc *>, uint32_t> EFASocket::poll_ctrl_cq(
     uint32_t budget) {

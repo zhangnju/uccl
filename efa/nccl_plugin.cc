@@ -414,7 +414,7 @@ ncclResult_t pluginIsend(void *sendComm, void *data, int size, int tag,
     *request = req;
     // LOG(INFO) << "pluginIsend on size " << size;
 
-    printf("pluginIsend on vdev: %d, size: %d, engine_id: %d, data: %lu\n", vdev, size, req->poll_ctx->engine_idx, (uint64_t)data);
+    // printf("pluginIsend on vdev: %d, size: %d, engine_id: %d, data: %lu\n", vdev, size, req->poll_ctx->engine_idx, (uint64_t)data);
 
 #ifdef POLLCTX_DEBUG
     LOG(INFO) << std::this_thread::get_id() << " pluginIsend on vdev: " << vdev
@@ -463,7 +463,7 @@ ncclResult_t pluginIrecv(void *recvComm, int n, void **data, int *sizes,
               << " data ptr " << std::hex << data;
 #endif
 
-    printf("pluginIrecv on vdev: %d, size: %d, engine_id: %d, data[0]: %lu\n", vdev, sizes[0], req->poll_ctx->engine_idx, (uint64_t)data[0]);
+    // printf("pluginIrecv on vdev: %d, size: %d, engine_id: %d, data[0]: %lu\n", vdev, sizes[0], req->poll_ctx->engine_idx, (uint64_t)data[0]);
 
     return ncclSuccess;
 }
@@ -554,6 +554,8 @@ ncclResult_t pluginIflush(void *recvComm, int n, void **data, int *sizes,
               << " data ptr " << std::hex << data;
 #endif
 
+    // printf("pluginIflush on vdev: %d, size: %d, engine_id: %d, data: %lu\n", vdev, sizes[0], req->poll_ctx->engine_idx, (uint64_t)data);
+
     return ncclSuccess;
 }
 
@@ -568,9 +570,11 @@ ncclResult_t pluginTest(void *request, int *done, int *size) {
             size[0] = req->poll_ctx->fix_tx_len;
             #endif
             VLOG(3) << "pluginTest ReqTx done: " << size[0];
+            // printf("pluginTest ReqTx done: %d\n", size[0]);
         } else if (req->type == ReqRx) {
             for (int i = 0; i < req->n; i++) size[i] = req->recv_len[i];
             VLOG(3) << "pluginTest ReqRx done: " << size[0];
+            // printf("pluginTest ReqRx done: %d\n", size[0]);
         } else if (req->type == ReqFlush) {
             // Do nothing.
         } else if (req->type == ReqRxScattered) {

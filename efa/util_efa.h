@@ -348,9 +348,17 @@ class EFASocket {
     union ibv_gid gid_;
 
     // Separating send and recv cq to allow better budget ctrl
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+    struct ibv_cq_ex *send_cq_;
+    struct ibv_cq_ex *recv_cq_;
+    #else
     struct ibv_cq *send_cq_;
     struct ibv_cq *recv_cq_;
+    #endif
     struct ibv_qp *qp_list_[kMaxSrcDstQP];
+
+    // Map qp_num to qp_idx.
+    std::unordered_map<uint32_t, uint32_t> qp_num_to_idx_;
 
     // Separating ctrl and data qp, so we can have different sizes for data
     // pkthdr and ack pkthdr.
@@ -408,7 +416,7 @@ class EFASocket {
     // qpns. The transport needs to supply the src_qp_idx so it can maintain
     // per-path state. Here path_id = <src_qpn, dst_qpn>.
     void post_recv_wrs(uint32_t budget, uint16_t qp_idx);
-    void post_recv_rdma_write_wrs(uint32_t budget, uint16_t qp_idx);
+    void post_recv_rdma_write_wrs(uint16_t qp_idx);
     void post_recv_wrs_for_ctrl(uint32_t budget, uint16_t qp_idx);
 
     // This polls send_cq_ for data qps; wr_id is FrameDesc*.

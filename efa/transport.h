@@ -71,13 +71,13 @@ class IMMData {
 public:
     // High-------------------32bit----------------------Low
     //  |            FLOWID            |    SEQ   |  LAST |
-    //                22bit                 9bit     1bit
+    //                15bit                16bit     1bit
     constexpr static int kLAST = 0;
     constexpr static int kSEQ = 1;
-    constexpr static int kFLOWID = 10;
+    constexpr static int kFLOWID = 17;
     
     constexpr static int kLAST_BITS = 1;
-    constexpr static int kSEQ_BITS = 9;
+    constexpr static int kSEQ_BITS = 16;
     constexpr static int kFLOWID_BITS = 32 - kSEQ_BITS - kLAST_BITS;
     
     constexpr static uint32_t kFLOWID_MASK = (1 << kFLOWID_BITS) - 1;
@@ -148,7 +148,7 @@ struct alignas(64) PollCtx {
         num_unfinished = 0;
         timestamp = 0;
         engine_idx = 0;
-        fix_tx_len = 0;
+        // Don't clear fix_tx_len, it's used for SRD RDMA write.
     }
 
     inline void write_barrier() {
@@ -468,7 +468,11 @@ class RXTracking {
         }
     };
     // Using seqno_cmp to handle integer wrapping.
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+    std::map<uint16_t, FrameDesc *, seqno_cmp> reass_q_;
+    #else
     std::map<uint32_t, FrameDesc *, seqno_cmp> reass_q_;
+    #endif
 
     // FIFO queue for ready messages that wait for app to claim.
     std::deque<FrameDesc *> ready_msg_queue_;

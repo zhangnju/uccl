@@ -93,6 +93,7 @@ class FrameDesc {
     struct ibv_ah *dest_ah_;  // dest ah to use for this frame.
 
     uint64_t cpe_time_tsc_;  // Completion event time.
+    uint64_t flow_id_;       // Flow ID for this frame.
 
     // Flags to denote the message buffer state.
     static const uint8_t UCCL_MSGBUF_FLAGS_SYN = (1 << 0);
@@ -119,6 +120,7 @@ class FrameDesc {
         next_ = nullptr;
         poll_ctx_ = nullptr;
         cpe_time_tsc_ = 0;
+        flow_id_ = 0;
     }
 
    public:
@@ -171,6 +173,9 @@ class FrameDesc {
         cpe_time_tsc_ = cpe_time_tsc;
     }
 
+    uint64_t get_flow_id() const { return flow_id_; }
+    void set_flow_id(uint64_t flow_id) { flow_id_ = flow_id; }
+
     // Returns true if this is the first in a message.
     bool is_first() const { return (msg_flags_ & UCCL_MSGBUF_FLAGS_SYN) != 0; }
     // Returns true if this is the last in a message.
@@ -200,6 +205,7 @@ class FrameDesc {
         next_ = nullptr;
         poll_ctx_ = nullptr;
         cpe_time_tsc_ = 0;
+        flow_id_ = 0;
     }
 
     std::string to_string() {

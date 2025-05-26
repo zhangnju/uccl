@@ -676,7 +676,6 @@ void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
 
     #if defined(USE_SRD) && !defined(SRD_USE_ACK)
         poll_ctx->nr_tx_signals_ = 0;
-        poll_ctx->flow_id = flow_id_;
     #endif
 
     while (remaining_bytes > 0 || tx_work.len == 0) {
@@ -690,6 +689,7 @@ void UcclFlow::tx_prepare_messages(Channel::Msg &tx_work) {
                                          (uint64_t)app_buf_cursor, payload_len,
                                          app_mr->lkey, 0);
         msgbuf->set_poll_ctx(poll_ctx);
+        msgbuf->set_flow_id(flow_id_);
 
         // auto pkt_payload_addr = msgbuf->get_pkt_addr() + kUcclPktHdrLen;
         // memcpy(pkt_payload_addr, app_buf_cursor, payload_len);
@@ -1454,7 +1454,7 @@ void UcclEngine::srd_ack_tx_signals(std::vector<FrameDesc *> &frames) {
 
     for (auto frame : frames) {
         auto *poll_ctx = (PollCtx *)frame->get_poll_ctx();
-        auto flow_id = poll_ctx->flow_id;
+        auto flow_id = frame->get_flow_id();
         auto it = active_flows_map_.find(flow_id);
         DCHECK(it != active_flows_map_.end());
         auto *flow = it->second;

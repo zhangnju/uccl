@@ -74,7 +74,6 @@ struct alignas(64) PollCtx {
 #endif
 
 #if defined(USE_SRD) && !defined(SRD_USE_ACK)
-    FlowID flow_id;
     uint32_t nr_tx_signals_;
 #endif
 

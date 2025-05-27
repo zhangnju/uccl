@@ -647,7 +647,7 @@ void UcclFlow::rx_messages() {
             FrameDesc *ack_frame =
                 craft_ackpacket(path_id, pcb_.seqno(), pcb_.ackno(), net_flags,
                                 timestamp1, timestamp2, rwnd);
-            ack_frame->set_dest_ah(remote_ah_);
+            ack_frame->set_dest_ah(remote_ctrl_ah_);
             ack_frame->set_dest_qpn(remote_meta_->qpn_list_ctrl[dst_qp_idx]);
 
             socket_->post_send_wr(ack_frame, src_qp_idx);
@@ -1596,7 +1596,8 @@ void UcclEngine::handle_install_flow_on_engine(Channel::CtrlMsg &ctrl_work) {
                      local_engine_idx_, remote_engine_idx, socket_, channel_,
                      flow_id, active_flows_map_, is_sender);
     auto *dev = EFAFactory::GetEFADevice(socket_->pdev_idx());
-    flow->remote_ah_ = dev->create_ah(remote_meta->gid);
+    flow->remote_ah_ = dev->create_ah(remote_meta->gid, EFA_NORMAL_SL);
+    flow->remote_ctrl_ah_ = dev->create_ah(remote_meta->gid, EFA_LOW_LATENCY_SL);
 
     std::tie(std::ignore, ret) = active_flows_map_.insert({flow_id, flow});
     DCHECK(ret);

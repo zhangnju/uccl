@@ -115,7 +115,7 @@ void run_server() {
     exchange_qpns(nullptr, local_meta, remote_meta);
 
     auto *dev = EFAFactory::GetEFADevice(EFA_DEV_ID);
-    auto *dest_ah = dev->create_ah(remote_meta->gid);
+    auto *dest_ah = dev->create_ah(remote_meta->gid, 8);
 
     std::vector<FrameDesc *> frames;
     FrameDesc *frame;
@@ -247,7 +247,7 @@ void run_client(const char *server_ip) {
     exchange_qpns(server_ip, local_meta, remote_meta);
 
     auto *dev = EFAFactory::GetEFADevice(EFA_DEV_ID);
-    auto *dest_ah = dev->create_ah(remote_meta->gid);
+    auto *dest_ah = dev->create_ah(remote_meta->gid, 8);
 
     uint64_t frame_desc, pkt_hdr, pkt_data;
     FrameDesc *frame;

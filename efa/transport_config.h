@@ -99,6 +99,8 @@ static const std::string ENA_DEVICE_NAME_LIST[] = {
 static constexpr double kLinkBandwidth = 400.0 * 1e9 / 8;  // 400Gbps
 #endif
 
+static const uint8_t EFA_NORMAL_SL = 0;
+static const uint8_t EFA_LOW_LATENCY_SL = 8;
 
 static const uint8_t EFA_PORT_NUM = 1;  // The port of EFA device to use.
 static const uint32_t EFA_MTU = 9000;  // Max frame on fabric, includng headers.
@@ -152,7 +154,7 @@ static const uint32_t kMaxMultiRecv = 8;
 
 #if defined(USE_SRD) && !defined(SRD_USE_ACK)
 static const uint32_t kMaxDstQP = 24;  // # of paths/QPs for data per src qp.
-static const uint32_t kMaxSrcQP = 8;
+static const uint32_t kMaxSrcQP = 4;
 #else
 static const uint32_t kMaxDstQP = 16;  // # of paths/QPs for data per src qp.
 static const uint32_t kMaxSrcQP = 16;
@@ -161,8 +163,8 @@ static const uint32_t kMaxSrcQP = 16;
 #ifdef USE_SRD_FOR_CTRL
 
 #if defined(USE_SRD) && !defined(SRD_USE_ACK)
-static const uint32_t kMaxDstQPCtrl = 1;  // # of paths/QPs for control.
-static const uint32_t kMaxSrcQPCtrl = 1;
+static const uint32_t kMaxDstQPCtrl = 16;  // # of paths/QPs for control.
+static const uint32_t kMaxSrcQPCtrl = 16;
 #else
 static const uint32_t kMaxDstQPCtrl = 16;  // # of paths/QPs for control.
 static const uint32_t kMaxSrcQPCtrl = 16;

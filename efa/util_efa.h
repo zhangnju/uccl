@@ -266,7 +266,7 @@ struct EFADevice {
     // Each is NIC-specific and binded with local pd_. The transport must call
     // this function to create ah and attached the ah to frame_desc before
     // sending these frames.
-    struct ibv_ah *create_ah(union ibv_gid remote_gid) {
+    struct ibv_ah *create_ah(union ibv_gid remote_gid, uint8_t sl) {
         struct ibv_ah_attr ah_attr = {};
 
         ah_attr.is_global = 1;  // Enable Global Routing Header (GRH)
@@ -276,6 +276,7 @@ struct EFADevice {
         ah_attr.grh.flow_label = 0;
         ah_attr.grh.hop_limit = 255;
         ah_attr.grh.traffic_class = 0;
+        ah_attr.sl = sl;
 
         struct ibv_ah *ah = ibv_create_ah(pd, &ah_attr);
         if (!ah) {

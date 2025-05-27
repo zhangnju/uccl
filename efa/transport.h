@@ -617,6 +617,7 @@ class UcclFlow {
     ConnMeta *local_meta_;
     ConnMeta *remote_meta_;
     struct ibv_ah *remote_ah_;
+    struct ibv_ah *remote_ctrl_ah_;
 
     // Which engine (also NIC queue and xsk) this flow belongs to.
     uint32_t local_engine_idx_;

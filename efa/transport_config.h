@@ -11,8 +11,8 @@
 #define USE_SRD_FOR_CTRL
 // #define SRD_USE_ACK
 
-// #define EMULATE_RC_ZC
-#define SCATTERED_MEMCPY
+#define EMULATE_RC_ZC
+// #define SCATTERED_MEMCPY
 // #define RTT_STATS
 // #define POLLCTX_DEBUG
 

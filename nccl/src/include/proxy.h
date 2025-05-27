@@ -15,7 +15,6 @@
 #include <pthread.h>
 #include "shmutils.h"
 #include "p2p.h"
-#include "sg_copy_if.h"
 
 typedef enum : uint8_t {
   ncclPatternRing,
@@ -113,8 +112,6 @@ struct ncclProxySubArgs {
   uint64_t received;
   uint64_t flushed;
   uint64_t transmitted;
-  // Yang: adding sg_copied count to track if sg_copy is done.
-  // uint64_t sg_copied;
   uint64_t done;
   uint64_t end;
   void* requests[NCCL_STEPS];
@@ -129,13 +126,6 @@ struct ncclProxySubArgs {
 
   void* recvRequestsCache[NCCL_STEPS];
   int recvRequestsSubCount;
-
-  // Yang: adding fifo poll handler cache for sg_copy.
-  // struct fifoPollHandler {
-  //   uint64_t fifo_idx;
-  //   uint64_t slot_idx;
-  // };
-  // fifoPollHandler fifoPollHandlerCache[NCCL_STEPS];
 };
 
 struct ncclProxyArgs {
@@ -324,10 +314,6 @@ struct ncclProxyState {
 
   // Queue of expected responses from the proxy
   struct ncclExpectedProxyResponse* expectedResponses;
-
-  // Yang: adding sg_copy states here.
-  // iovMultiFifo* sgCopyEngine;
-  // cudaStream_t copyTestStream;
 };
 
 enum proxyConnectState {

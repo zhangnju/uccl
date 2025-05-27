@@ -107,9 +107,6 @@ enum ncclRegBufferType {
   NCCL_COLLNET_REG_BUFFER = 3
 };
 
-// Yang: ncclConnInfo is used by GPU device, ncclRecvMem and ncclSendMem are used by CPU proxy thread. 
-// Yang: ncclConnInfo.tail and .head point to ncclRecvMem.tail and ncclSendMem.head. 
-// Yang: ncclConnInfo.connFifo points to ncclRecvMem.connFifo, see net.cc->recvConnect().
 struct ncclConnInfo {
   // Regular comm mechanism
   char *buffs[NCCL_NUM_PROTOCOLS]; // Local for recv, remote for send
@@ -552,17 +549,6 @@ inline int ncclDevFuncId(int coll, int devRedOp, int type, int algo, int proto) 
     row = 0; // ncclDevFuncIndex_P2p
     if (coll == ncclFuncSendRecv) break;
     row += 1;
-
-    // Yang: hack to compile faster.
-    // if (coll == ncclFuncAllReduce && algo == NCCL_ALGO_TREE && proto == NCCL_PROTO_LL) break;
-    // row += 1;
-    // if (coll == ncclFuncAllReduce && algo == NCCL_ALGO_TREE && proto == NCCL_PROTO_SIMPLE) break;
-    // row += 1;
-    // if (coll == ncclFuncAllReduce && algo == NCCL_ALGO_RING && proto == NCCL_PROTO_LL) break;
-    // row += 1;
-    // if (coll == ncclFuncAllReduce && algo == NCCL_ALGO_RING && proto == NCCL_PROTO_SIMPLE) break;
-    // row += 1;
-    // break;
 
     int nAlgos = 4;
     if (coll == ncclFuncAllGather) {

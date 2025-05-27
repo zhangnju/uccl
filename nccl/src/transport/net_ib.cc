@@ -2233,8 +2233,6 @@ ncclNet_t ncclNetIb = {
   ncclIbDeregMr,
   ncclIbIsend,
   ncclIbIrecv,
-  NULL,
-  NULL,
   ncclIbIflush,
   ncclIbTest,
   ncclIbCloseSend,

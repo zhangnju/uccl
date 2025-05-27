@@ -17,6 +17,24 @@
 namespace uccl {
 namespace swift {
 
+#if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+constexpr bool seqno_lt(uint16_t a, uint16_t b) {
+    return static_cast<int16_t>(a - b) < 0;
+}
+constexpr bool seqno_le(uint16_t a, uint16_t b) {
+    return static_cast<int16_t>(a - b) <= 0;
+}
+constexpr bool seqno_eq(uint16_t a, uint16_t b) {
+    return static_cast<int16_t>(a - b) == 0;
+}
+constexpr bool seqno_ge(uint16_t a, uint16_t b) {
+    return static_cast<int16_t>(a - b) >= 0;
+}
+constexpr bool seqno_gt(uint16_t a, uint16_t b) {
+    return static_cast<int16_t>(a - b) > 0;
+}
+
+#else
 constexpr bool seqno_lt(uint32_t a, uint32_t b) {
     return static_cast<int32_t>(a - b) < 0;
 }
@@ -32,6 +50,7 @@ constexpr bool seqno_ge(uint32_t a, uint32_t b) {
 constexpr bool seqno_gt(uint32_t a, uint32_t b) {
     return static_cast<int32_t>(a - b) > 0;
 }
+#endif
 
 /**
  * @brief Swift Congestion Control (SWCC) protocol control block.
@@ -45,10 +64,17 @@ struct Pcb {
     Pcb() {}
 
     uint32_t target_delay{0};
+    #if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
+    uint16_t snd_nxt{kInitSeq};
+    uint16_t snd_una{kInitSeq};
+    uint16_t snd_ooo_acks{0};
+    uint16_t rcv_nxt{kInitSeq};
+    #else
     uint32_t snd_nxt{kInitSeq};
     uint32_t snd_una{kInitSeq};
     uint32_t snd_ooo_acks{0};
     uint32_t rcv_nxt{kInitSeq};
+    #endif
     uint64_t sack_bitmap[kSackBitmapSize / kSackBitmapBucketSize]{0};
     uint8_t sack_bitmap_count{0};
     uint16_t duplicate_acks{0};
@@ -66,9 +92,7 @@ struct Pcb {
     }
     uint16_t ackno() const { return rcv_nxt; }
     uint16_t get_rcv_nxt() const { return rcv_nxt; }
-    
     #else
-    
     uint32_t seqno() const { return snd_nxt; }
     uint32_t get_snd_nxt() {
         uint32_t seqno = snd_nxt;
@@ -77,7 +101,6 @@ struct Pcb {
     }
     uint32_t ackno() const { return rcv_nxt; }
     uint32_t get_rcv_nxt() const { return rcv_nxt; }
-    
     #endif
 
     void advance_rcv_nxt() { rcv_nxt++; }

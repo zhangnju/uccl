@@ -55,11 +55,10 @@ else
       # COPY_CHANNELS=32
       # CHANNELS_NET_PEER=16
 
-      # For RDMA WRITE, we use same parameters as NCCL-SRD
-      NCCL_P2P_NET_CHUNKSIZE=524288
+      NCCL_P2P_NET_CHUNKSIZE=131072
       NCCL_BUFFSIZE=8388608
       COPY_CHANNELS=8
-      CHANNELS_NET_PEER=4
+      CHANNELS_NET_PEER=16
 
 fi
 
@@ -94,11 +93,11 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x NCCL_GDRCOPY_FIFO_ENABLE=0 \
       -x NCCL_PROTO=Simple \
       -x NCCL_TOPO_FILE=${ROOT_DIR}/efa/p5en-48xl-topo.xml \
-      -x GLOG_logtostderr=1 \
+      -x GLOG_logtostderr=0 \
       -x UCCL_ENGINE_QUIET=1 \
       ${NCCL_TESTS_PATH} \
-      -f 2 -b 1K -e 1G \
-      -w 10 -n 10 \
+      -f 2 -b 1K -e 32M \
+      -w 0 -n 10 \
       -c 1 -g 1 -t 1
 
 # -x NCCL_DEBUG=INFO \

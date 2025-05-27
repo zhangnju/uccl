@@ -22,7 +22,7 @@
 // #define POLLCTX_DEBUG
 
 // #define TEST_SINGLE_PDEV
-#define CONN_SPLIT
+// #define CONN_SPLIT
 
 enum class SenderCCType {
     kNone,
@@ -44,11 +44,11 @@ static_assert(
 // #define P4D
 #define P5EN
 
-static constexpr uint32_t kSRDChunkSize = 512 << 10;
+static constexpr uint32_t kSRDChunkSize = 8928;
 
 static const uint32_t kBundleNIC = 2;
 static const uint32_t kNumVdevices = 8;        // # of vEFA/GPUs.
-static const uint32_t kNumEnginesPerVdev = kBundleNIC * 2;  // # of engines per vEFA/GPU.
+static const uint32_t kNumEnginesPerVdev = kBundleNIC * 4;  // # of engines per vEFA/GPU.
 static const uint32_t kNumEngines = kNumVdevices * kNumEnginesPerVdev;
 static const bool kSplitSendRecvEngine =
     false;  // Split sender/recevier flows to dedicated engines.
@@ -154,11 +154,7 @@ static const uint32_t kMaxSendRecvWrForCtrl = 1024;
 static const uint32_t kMaxCqeTotal = 16384;
 static const uint32_t kMaxPollBatch = 32;
 static const uint32_t kMaxRecvWrDeficit = 32;
-#if defined(USE_SRD) && defined(SRD_RDMA_WRITE)
-static const uint32_t kMaxChainedWr = 4;
-#else
 static const uint32_t kMaxChainedWr = 32;
-#endif
 static const uint32_t kMaxUnconsumedRxMsgbufs = NUM_FRAMES / 16;
 static const uint32_t kMaxMultiRecv = 8;
 
@@ -168,7 +164,7 @@ static const uint32_t kMaxMultiRecv = 8;
 #if defined(USE_SRD) && !defined(SRD_USE_ACK)
 
 #ifdef SRD_RDMA_WRITE
-static const uint32_t kMaxDstQP = 8;  // # of paths/QPs for data per src qp.
+static const uint32_t kMaxDstQP = 24;  // # of paths/QPs for data per src qp.
 static const uint32_t kMaxSrcQP = 8;
 #else
 static const uint32_t kMaxDstQP = 24;  // # of paths/QPs for data per src qp.

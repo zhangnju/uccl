@@ -54,8 +54,7 @@ else
       NCCL_BUFFSIZE=8388608
 
       COPY_CHANNELS=32
-      CHANNELS_NET_PEER=10
-
+      CHANNELS_NET_PEER=16
 fi
 
 # alltoall_perf all_reduce_perf all_gather_perf
@@ -89,7 +88,7 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x GLOG_logtostderr=0 \
       -x UCCL_ENGINE_QUIET=1 \
       ${NCCL_TESTS_PATH} \
-      -f 2 -b 1K -e 1G \
+      -f 2 -b 1K -e 16G \
       -w 10 -n 20 \
       -c 1 -g 1 -t 1
 

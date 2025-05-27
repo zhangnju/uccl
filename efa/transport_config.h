@@ -152,7 +152,7 @@ static const uint32_t kMaxMultiRecv = 8;
 
 #if defined(USE_SRD) && !defined(SRD_USE_ACK)
 static const uint32_t kMaxDstQP = 24;  // # of paths/QPs for data per src qp.
-static const uint32_t kMaxSrcQP = 24;
+static const uint32_t kMaxSrcQP = 8;
 #else
 static const uint32_t kMaxDstQP = 16;  // # of paths/QPs for data per src qp.
 static const uint32_t kMaxSrcQP = 16;
@@ -183,7 +183,7 @@ static const uint32_t kMaxPathCtrl = kMaxDstQPCtrl * kMaxSrcQPCtrl;
 
 // CC parameters.
 static const double kMaxUnackedPktsPP = 4;
-static const uint32_t kMaxUnackedPktsPerEngine = kMaxUnackedPktsPP * kMaxPath;
+static const uint32_t kMaxUnackedPktsPerEngine = std::max((int)(kMaxUnackedPktsPP * kMaxPath), 512);
 static const std::size_t kSackBitmapSize = 1024;
 #ifdef USE_SRD
 static const std::size_t kFastRexmitDupAckThres = 65536;

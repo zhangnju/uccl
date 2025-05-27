@@ -1451,7 +1451,7 @@ void UcclEngine::run() {
 
 #if defined(USE_SRD) && !defined(SRD_USE_ACK)
 void UcclEngine::srd_ack_tx_signals(std::vector<FrameDesc *> &frames) {
-
+    std::unordered_map<UcclFlow *, uint32_t> flow_acked_pkts;
     for (auto frame : frames) {
         auto *poll_ctx = (PollCtx *)frame->get_poll_ctx();
         auto flow_id = frame->get_flow_id();
@@ -1474,6 +1474,17 @@ void UcclEngine::srd_ack_tx_signals(std::vector<FrameDesc *> &frames) {
 
         // FIXME
         flow->increase_rwnd();
+
+        if (flow_acked_pkts.find(flow) == flow_acked_pkts.end()) {
+            flow_acked_pkts[flow] = 0;
+        }
+        flow_acked_pkts[flow]++;
+    }
+
+    if constexpr (kSenderCCType == SenderCCType::kCubic) {
+        for (auto [flow, acked_pkts] : flow_acked_pkts) {
+            flow->cubic_g_.cubic_on_recv_ack(acked_pkts);
+        }
     }
 }
 #endif

@@ -14,7 +14,6 @@
 #define EMULATE_RC_ZC
 // #define SCATTERED_MEMCPY
 // #define RTT_STATS
-// #define POLLCTX_DEBUG
 
 // #define TEST_SINGLE_PDEV
 // #define CONN_SPLIT

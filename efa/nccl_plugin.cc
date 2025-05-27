@@ -12,6 +12,8 @@ using namespace uccl;
 
 const char *PLUGIN_NAME = "EFA_Plugin";
 
+#define STRIPE_SIZE (128 << 10)
+
 /**
  * *** Concepts ***
  * * vdev: virtual device which bundles multiple physical devices. For p5en, each vdev bundles 2 physical devices.
@@ -390,12 +392,9 @@ ncclResult_t pluginDeregMr(void *collComm, void *mhandle) {
 
 ncclResult_t pluginIsend(void *sendComm, void *data, int size, int tag,
                          void *mhandle, void **request) {
-    // DCHECK(size > 0 && size <= 524288) << "size " << size;
-    // DCHECK(size <= 1048576) << "pluginIsend size " << size;
     struct UcclSendComm *scomm = (struct UcclSendComm *)sendComm;
     auto conn_id = scomm->base.conn_id;
     struct Mhandle *mh = (struct Mhandle *)mhandle;
-    // checkMemoryLocation(data);
     uint64_t addr;
     auto vdev = scomm->base.vdev;
     if (scomm->base.uccl_req_pool->alloc_buff(&addr)) {
@@ -412,15 +411,6 @@ ncclResult_t pluginIsend(void *sendComm, void *data, int size, int tag,
     req->req_pool = (void *)scomm->base.uccl_req_pool.get();
 
     *request = req;
-    // LOG(INFO) << "pluginIsend on size " << size;
-
-#ifdef POLLCTX_DEBUG
-    LOG(INFO) << std::this_thread::get_id() << " pluginIsend on vdev: " << vdev
-              << " size " << size << " engine_id " << req->poll_ctx->engine_idx
-              << " flow_id " << conn_id.flow_id << " req_id "
-              << req->poll_ctx->req_id << " data ptr " << std::hex << data
-              << " req ptr " << req;
-#endif
     return ncclSuccess;
 }
 
@@ -429,7 +419,6 @@ ncclResult_t pluginIrecv(void *recvComm, int n, void **data, int *sizes,
     struct UcclRecvComm *rcomm = (struct UcclRecvComm *)recvComm;
     auto conn_id = rcomm->base.conn_id;
     struct Mhandle **mhs = (struct Mhandle **)mhandles;
-    // checkMemoryLocation(data[0]);
 
     uint64_t addr;
     auto vdev = rcomm->base.vdev;
@@ -448,14 +437,6 @@ ncclResult_t pluginIrecv(void *recvComm, int n, void **data, int *sizes,
 
     *request = req;
 
-#ifdef POLLCTX_DEBUG
-    LOG(INFO) << std::this_thread::get_id() << " pluginIrecv on vdev: " << vdev
-              << " size " << sizes[0] << " engine_id "
-              << req->poll_ctx->engine_idx << " flow_id " << conn_id.flow_id
-              << " n " << n << " req_id " << req->poll_ctx->req_id
-              << " data ptr " << std::hex << data;
-#endif
-
     return ncclSuccess;
 }
 
@@ -464,7 +445,6 @@ ncclResult_t pluginIrecvScattered(void *recvComm, int *tags, void *mhandles,
     struct UcclRecvComm *rcomm = (struct UcclRecvComm *)recvComm;
     auto conn_id = rcomm->base.conn_id;
     struct Mhandle *mhs = (struct Mhandle *)mhandles;
-    // checkMemoryLocation(data[0]);
 
     uint64_t addr;
     auto vdev = rcomm->base.vdev;
@@ -483,14 +463,6 @@ ncclResult_t pluginIrecvScattered(void *recvComm, int *tags, void *mhandles,
 
     *request = req;
 
-#ifdef POLLCTX_DEBUG
-    LOG(INFO) << std::this_thread::get_id()
-              << " pluginIrecvScattered on vdev: " << vdev << " engine_id "
-              << req->poll_ctx->engine_idx << " flow_id " << conn_id.flow_id
-              << " n " << 1 << " req_id " << req->poll_ctx->req_id << " req ptr"
-              << req;
-#endif
-
     return ncclSuccess;
 }
 
@@ -504,14 +476,6 @@ ncclResult_t pluginIrecvFreePtrs(void *recvComm, void *request) {
     auto uccl_req_pool = reinterpret_cast<UcclRequestBuffPool *>(req->req_pool);
     uccl_req_pool->free_buff(reinterpret_cast<uint64_t>(req));
 
-#ifdef POLLCTX_DEBUG
-    LOG(INFO) << std::this_thread::get_id()
-              << " pluginIrecvFreePtrs on vdev: " << rcomm->base.vdev
-              << " engine_id " << req->poll_ctx->engine_idx << " flow_id "
-              << conn_id.flow_id << " req_id " << req->poll_ctx->req_id
-              << " req ptr " << req;
-#endif
-
     return ncclSuccess;
 }
 
@@ -520,7 +484,7 @@ ncclResult_t pluginIflush(void *recvComm, int n, void **data, int *sizes,
     struct UcclRecvComm *rcomm = (struct UcclRecvComm *)recvComm;
     auto conn_id = rcomm->base.conn_id;
     struct Mhandle **mhs = (struct Mhandle **)mhandles;
-    // checkMemoryLocation(data[0]);
+
     uint64_t addr;
     auto vdev = rcomm->base.vdev;
     if (rcomm->base.uccl_req_pool->alloc_buff(&addr)) {
@@ -536,14 +500,6 @@ ncclResult_t pluginIflush(void *recvComm, int n, void **data, int *sizes,
     req->req_pool = (void *)rcomm->base.uccl_req_pool.get();
 
     *request = req;
-
-#ifdef POLLCTX_DEBUG
-    LOG(INFO) << std::this_thread::get_id() << " pluginIflush on vdev: " << vdev
-              << " size " << sizes[0] << " engine_id "
-              << req->poll_ctx->engine_idx << " flow_id " << conn_id.flow_id
-              << " n " << n << " req_id " << req->poll_ctx->req_id
-              << " data ptr " << std::hex << data;
-#endif
 
     return ncclSuccess;
 }
@@ -571,24 +527,8 @@ ncclResult_t pluginTest(void *request, int *done, int *size) {
                 reinterpret_cast<UcclRequestBuffPool *>(req->req_pool);
             uccl_req_pool->free_buff(reinterpret_cast<uint64_t>(req));
         }
-
-#ifdef POLLCTX_DEBUG
-        LOG(INFO) << std::this_thread::get_id() << " pluginTest " << req->type
-                  << " done: engine_id " << req->poll_ctx->engine_idx
-                  << " flow_id " << req->poll_ctx->flow_id << " req_id "
-                  << req->poll_ctx->req_id << " size " << size[0] << " req ptr"
-                  << req;
-#endif
     } else {
         *done = 0;
-
-#ifdef POLLCTX_DEBUG
-        LOG_EVERY_N(INFO, 1000000)
-            << "pluginTest poll NOT done: "
-            << (req->type == ReqTx ? "ReqTx" : "ReqRx") << " engine_id "
-            << req->poll_ctx->engine_idx << " flow_id "
-            << req->poll_ctx->flow_id << " req_id " << req->poll_ctx->req_id;
-#endif
     }
 
     return ncclSuccess;

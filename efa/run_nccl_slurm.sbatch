@@ -41,7 +41,7 @@ if [ "$TEST" = "nccl" ]; then
       NCCL_BUFFSIZE=8388608
 
       COPY_CHANNELS=8
-      CHANNELS_NET_PEER=4
+      CHANNELS_NET_PEER=8
 
 else
       LIBNCCL_PATH="${ROOT_DIR}/nccl/build/lib/libnccl.so"
@@ -54,7 +54,7 @@ else
       NCCL_BUFFSIZE=8388608
 
       COPY_CHANNELS=8
-      CHANNELS_NET_PEER=16
+      CHANNELS_NET_PEER=8
 fi
 
 # alltoall_perf all_reduce_perf all_gather_perf

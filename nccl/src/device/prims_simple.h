@@ -9,7 +9,7 @@
 #include <cassert>
 
 // Yang:
-#define SCATTERED_SG
+// #define SCATTERED_SG
 
 enum primsMode {
   primsModeDefault = 0,

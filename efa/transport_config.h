@@ -154,7 +154,7 @@ static const uint32_t kMaxMultiRecv = 8;
 
 #if defined(USE_SRD) && !defined(SRD_USE_ACK)
 static const uint32_t kMaxDstQP = 24;  // # of paths/QPs for data per src qp.
-static const uint32_t kMaxSrcQP = 4;
+static const uint32_t kMaxSrcQP = 8;
 #else
 static const uint32_t kMaxDstQP = 16;  // # of paths/QPs for data per src qp.
 static const uint32_t kMaxSrcQP = 16;
@@ -163,8 +163,8 @@ static const uint32_t kMaxSrcQP = 16;
 #ifdef USE_SRD_FOR_CTRL
 
 #if defined(USE_SRD) && !defined(SRD_USE_ACK)
-static const uint32_t kMaxDstQPCtrl = 16;  // # of paths/QPs for control.
-static const uint32_t kMaxSrcQPCtrl = 16;
+static const uint32_t kMaxDstQPCtrl = 1;  // # of paths/QPs for control.
+static const uint32_t kMaxSrcQPCtrl = 1;
 #else
 static const uint32_t kMaxDstQPCtrl = 16;  // # of paths/QPs for control.
 static const uint32_t kMaxSrcQPCtrl = 16;

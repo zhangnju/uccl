@@ -90,7 +90,7 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       ${NCCL_TESTS_PATH} \
       -f 2 -b 1K -e 1G \
       -w 10 -n 20 \
-      -c 1 -g 1 -t 1
+      -c 0 -g 1 -t 1
 
 # -x NCCL_DEBUG=INFO \
 # -x NCCL_P2P_DISABLE=1 \

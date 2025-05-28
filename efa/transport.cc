@@ -2173,8 +2173,50 @@ void Endpoint::uccl_recv_free_ptrs(ConnID conn_id, int iov_n,
 }
 
 PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
+                                         int *len_p, Mhandle **mhandle, int n, int offset) {
+    PollCtx *poll_ctx = ctx_pool_->pop();
+    DCHECK(poll_ctx != nullptr);
+    poll_ctx->num_unfinished = n;
+
+    #ifdef CONN_SPLIT
+    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kNumEnginesPerVdev;
+    #else
+    auto pdev_offset = ((*conn_id.next_pdev_offset_recv)++ / kNMSGLB) % kBundleNIC;
+    #endif
+
+    #ifdef TEST_SINGLE_PDEV
+    #ifdef CONN_SPLIT
+        pdev_offset = (*conn_id.next_pdev_offset_recv) % kBundleNIC;
+    #else
+        pdev_offset = 0;
+    #endif
+    #endif
+
+    poll_ctx->engine_idx = conn_id.engine_idx[pdev_offset];
+
+    Channel::Msg msg[kMaxMultiRecv];
+    for (int i = 0; i < n; i++) {
+        msg[i] = {
+            .opcode = Channel::Msg::Op::kRx,
+            .len = 0,
+            .len_p = &(len_p[i]),
+            .data = data[i] + offset,
+            .mhandle = mhandle[i],
+            .pdev_offset = pdev_offset,
+            .flow_id = conn_id.flow_id,
+            .deser_msgs = nullptr,
+            .poll_ctx = poll_ctx,
+        };
+    }
+    Channel::enqueue_mp_multi(channel_vec_[poll_ctx->engine_idx]->rx_task_q_,
+                              (void *)msg, n);
+    return poll_ctx;
+}
+
+PollCtx *Endpoint::uccl_recv_multi_async(ConnID conn_id, void **data,
                                          int *len_p, Mhandle **mhandle, int n) {
     PollCtx *poll_ctx = ctx_pool_->pop();
+    DCHECK(poll_ctx != nullptr);
     poll_ctx->num_unfinished = n;
 
     #ifdef CONN_SPLIT

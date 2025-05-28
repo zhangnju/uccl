@@ -13,6 +13,13 @@ using namespace uccl;
 const char *PLUGIN_NAME = "EFA_Plugin";
 
 #define STRIPE_SIZE (128 << 10)
+#define MAX_NR_STRIPES 4
+
+struct stripe_info {
+    uint32_t nr_stripes;
+    struct UcclRequest *req[MAX_NR_STRIPES];
+    bool done[MAX_NR_STRIPES];
+};
 
 /**
  * *** Concepts ***
@@ -26,7 +33,7 @@ const char *PLUGIN_NAME = "EFA_Plugin";
 
 class UcclRequestBuffPool : public BuffPool {
     static constexpr size_t num_elements =
-        kMaxUnconsumedRxMsgbufs;  // Send and receive.
+        2 * kMaxUnconsumedRxMsgbufs;  // Send and receive.
     static constexpr size_t element_size = sizeof(UcclRequest);
 
    public:
@@ -395,22 +402,36 @@ ncclResult_t pluginIsend(void *sendComm, void *data, int size, int tag,
     struct UcclSendComm *scomm = (struct UcclSendComm *)sendComm;
     auto conn_id = scomm->base.conn_id;
     struct Mhandle *mh = (struct Mhandle *)mhandle;
-    uint64_t addr;
-    auto vdev = scomm->base.vdev;
-    if (scomm->base.uccl_req_pool->alloc_buff(&addr)) {
-        CHECK(false);
-        *request = nullptr;
-        return ncclSuccess;
+
+    // Split into multiple stripes.
+    auto nr_stripes = (size + STRIPE_SIZE - 1) / STRIPE_SIZE;
+    CHECK(nr_stripes <= MAX_NR_STRIPES);
+    
+    *request = (struct UcclRequest *)malloc(sizeof(struct stripe_info));
+    auto stripe_info = (struct stripe_info *)*request;
+    stripe_info->nr_stripes = nr_stripes;
+
+    auto remaining_size = size;
+
+    for (int i = 0; i < nr_stripes; i++) {
+        uint64_t addr;
+        auto vdev = scomm->base.vdev;
+        if (scomm->base.uccl_req_pool->alloc_buff(&addr)) {
+            CHECK(false);
+            *request = nullptr;
+            return ncclSuccess;
+        }
+
+        struct UcclRequest *req = reinterpret_cast<struct UcclRequest *>(addr);
+        req->type = ReqTx;
+        req->n = 1;
+        req->send_len = std::min(remaining_size, STRIPE_SIZE);
+        remaining_size -= req->send_len;
+        req->poll_ctx = ep->uccl_send_async(conn_id, data + i * STRIPE_SIZE, req->send_len, mh);
+        req->req_pool = (void *)scomm->base.uccl_req_pool.get();
+        stripe_info->req[i] = req;
+        stripe_info->done[i] = false;
     }
-
-    struct UcclRequest *req = reinterpret_cast<struct UcclRequest *>(addr);
-    req->type = ReqTx;
-    req->n = 1;
-    req->send_len = size;
-    req->poll_ctx = ep->uccl_send_async(conn_id, data, req->send_len, mh);
-    req->req_pool = (void *)scomm->base.uccl_req_pool.get();
-
-    *request = req;
     return ncclSuccess;
 }
 
@@ -420,24 +441,36 @@ ncclResult_t pluginIrecv(void *recvComm, int n, void **data, int *sizes,
     auto conn_id = rcomm->base.conn_id;
     struct Mhandle **mhs = (struct Mhandle **)mhandles;
 
-    uint64_t addr;
-    auto vdev = rcomm->base.vdev;
-    if (rcomm->base.uccl_req_pool->alloc_buff(&addr)) {
-        CHECK(false);
-        *request = nullptr;
-        return ncclSuccess;
+    DCHECK(n == 1);
+    // Split into multiple stripes.
+    auto nr_stripes = (sizes[0] + STRIPE_SIZE - 1) / STRIPE_SIZE;
+    CHECK(nr_stripes <= MAX_NR_STRIPES);
+
+    *request = (struct UcclRequest *)malloc(sizeof(struct stripe_info));
+    auto stripe_info = (struct stripe_info *)*request;
+    stripe_info->nr_stripes = nr_stripes;
+    
+    for (int i = 0; i < nr_stripes; i++) {
+        uint64_t addr;
+        auto vdev = rcomm->base.vdev;
+        if (rcomm->base.uccl_req_pool->alloc_buff(&addr)) {
+            CHECK(false);
+            *request = nullptr;
+            return ncclSuccess;
+        }
+
+        struct UcclRequest *req = reinterpret_cast<struct UcclRequest *>(addr);
+        req->type = ReqRx;
+        req->n = 1;
+        req->poll_ctx =
+            ep->uccl_recv_multi_async(conn_id, data, req->recv_len, mhs, 1, i * STRIPE_SIZE);
+        req->req_pool = (void *)rcomm->base.uccl_req_pool.get();
+        stripe_info->req[i] = req;
+        stripe_info->done[i] = false;
     }
 
-    struct UcclRequest *req = reinterpret_cast<struct UcclRequest *>(addr);
-    req->type = ReqRx;
-    req->n = n;
-    req->poll_ctx =
-        ep->uccl_recv_multi_async(conn_id, data, req->recv_len, mhs, n);
-    req->req_pool = (void *)rcomm->base.uccl_req_pool.get();
-
-    *request = req;
-
     return ncclSuccess;
+
 }
 
 ncclResult_t pluginIrecvScattered(void *recvComm, int *tags, void *mhandles,
@@ -485,6 +518,12 @@ ncclResult_t pluginIflush(void *recvComm, int n, void **data, int *sizes,
     auto conn_id = rcomm->base.conn_id;
     struct Mhandle **mhs = (struct Mhandle **)mhandles;
 
+    DCHECK(n == 1);
+
+    *request = (struct UcclRequest *)malloc(sizeof(struct stripe_info));
+    auto stripe_info = (struct stripe_info *)*request;
+    stripe_info->nr_stripes = 1;
+
     uint64_t addr;
     auto vdev = rcomm->base.vdev;
     if (rcomm->base.uccl_req_pool->alloc_buff(&addr)) {
@@ -499,37 +538,50 @@ ncclResult_t pluginIflush(void *recvComm, int n, void **data, int *sizes,
     req->poll_ctx = ep->uccl_flush_async(conn_id, data, req->recv_len, mhs, n);
     req->req_pool = (void *)rcomm->base.uccl_req_pool.get();
 
-    *request = req;
+    stripe_info->req[0] = req;
+    stripe_info->done[0] = false;
 
     return ncclSuccess;
 }
 
 ncclResult_t pluginTest(void *request, int *done, int *size) {
-    struct UcclRequest *req = reinterpret_cast<struct UcclRequest *>(request);
+    struct stripe_info *stripe_info = reinterpret_cast<struct stripe_info *>(request);
 
-    if (ep->uccl_poll_once(req->poll_ctx)) {
-        *done = 1;
-        if (req->type == ReqTx) {
-            size[0] = req->send_len;
-            VLOG(3) << "pluginTest ReqTx done: " << size[0];
-        } else if (req->type == ReqRx) {
-            for (int i = 0; i < req->n; i++) size[i] = req->recv_len[i];
-            VLOG(3) << "pluginTest ReqRx done: " << size[0];
-        } else if (req->type == ReqFlush) {
-            // Do nothing.
-        } else if (req->type == ReqRxScattered) {
-            size[0] = req->recv_len[0];
-            VLOG(3) << "pluginTest ReqRxScattered done: " << size[0];
+    auto nr_stripes = stripe_info->nr_stripes;
+
+    size[0] = 0;
+    auto nr_done = 0;
+    for (int i = 0; i < nr_stripes; i++) {
+        if (stripe_info->done[i]) {
+            nr_done++;
+            continue;
         }
-        // request from ReqRxScattered will be freed by pluginIrecvFreePtrs
-        if (req->type != ReqRxScattered) {
-            auto uccl_req_pool =
-                reinterpret_cast<UcclRequestBuffPool *>(req->req_pool);
-            uccl_req_pool->free_buff(reinterpret_cast<uint64_t>(req));
+        auto *req = stripe_info->req[i];
+        if (ep->uccl_poll_once(req->poll_ctx)) {
+            stripe_info->done[i] = true;
+            nr_done++;
+            if (req->type == ReqTx) {
+                size[0] += req->send_len;
+            } else if (req->type == ReqRx) {
+                size[0] += req->recv_len[0];
+            } else if (req->type == ReqFlush) {
+                // Do nothing.
+            } else if (req->type == ReqRxScattered) {
+                size[0] += req->recv_len[0];
+            }
+            // request from ReqRxScattered will be freed by pluginIrecvFreePtrs
+            if (req->type != ReqRxScattered) {
+                auto uccl_req_pool =
+                    reinterpret_cast<UcclRequestBuffPool *>(req->req_pool);
+                uccl_req_pool->free_buff(reinterpret_cast<uint64_t>(req));
+            }
         }
-    } else {
-        *done = 0;
     }
+
+    *done = nr_done == nr_stripes;
+
+    if (*done)
+        free(stripe_info);
 
     return ncclSuccess;
 }

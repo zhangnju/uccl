@@ -907,6 +907,8 @@ class Endpoint {
     void uccl_recv_free_ptrs(ConnID conn_id, int iov_n, void **iov_addrs, uint32_t pdev_offset);
     PollCtx *uccl_recv_multi_async(ConnID conn_id, void **data, int *len_p,
                                    Mhandle **mhandle, int n);
+    PollCtx *uccl_recv_multi_async(ConnID conn_id, void **data, int *len_p,
+                                   Mhandle **mhandle, int n, int offset);
     PollCtx *uccl_flush_async(ConnID conn_id, void **data, int *len_p,
                               Mhandle **mhandle, int n);
 

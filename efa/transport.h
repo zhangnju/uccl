@@ -843,7 +843,7 @@ class UcclEngine {
  * its all queues.
  */
 class Endpoint {
-    constexpr static uint16_t kBootstrapPort = 30000;
+    constexpr static uint16_t kBootstrapPort = 10000;
     constexpr static uint32_t kStatsTimerIntervalSec = 2;
 
     Channel *channel_vec_[kNumEngines];

@@ -19,6 +19,7 @@ struct stripe_info {
     uint32_t nr_stripes;
     struct UcclRequest *req[MAX_NR_STRIPES];
     bool done[MAX_NR_STRIPES];
+    void *stripe_pool;
 };
 
 /**
@@ -33,12 +34,22 @@ struct stripe_info {
 
 class UcclRequestBuffPool : public BuffPool {
     static constexpr size_t num_elements =
-        2 * kMaxUnconsumedRxMsgbufs;  // Send and receive.
+        MAX_NR_STRIPES * kMaxUnconsumedRxMsgbufs;  // Send and receive.
     static constexpr size_t element_size = sizeof(UcclRequest);
 
    public:
     UcclRequestBuffPool() : BuffPool(num_elements, element_size, nullptr) {}
     ~UcclRequestBuffPool() = default;
+};
+
+class UcclStripePool : public BuffPool {
+    static constexpr size_t num_elements = 
+        kMaxUnconsumedRxMsgbufs;
+    static constexpr size_t element_size = sizeof(stripe_info);
+
+    public:
+    UcclStripePool() : BuffPool(num_elements, element_size, nullptr) {}
+    ~UcclStripePool() = default;
 };
 
 Endpoint *ep;
@@ -49,6 +60,7 @@ struct UcclBaseComm {
     int vdev;
     ConnID conn_id;
     std::shared_ptr<UcclRequestBuffPool> uccl_req_pool;
+    std::shared_ptr<UcclStripePool> uccl_stripe_pool;
 };
 
 struct AsyncAcceptState {
@@ -268,6 +280,7 @@ ncclResult_t pluginConnect(int vdev, void *opaque_handle, void **sendComm,
         DCHECK(handle->state == kConnConnected);
         scomm->base = handle->connect_buffer.base;
         scomm->base.uccl_req_pool = std::make_shared<UcclRequestBuffPool>();
+        scomm->base.uccl_stripe_pool = std::make_shared<UcclStripePool>();
         *sendComm = scomm;
     }
 
@@ -323,6 +336,7 @@ ncclResult_t pluginAccept(void *listenComm, void **recvComm,
         DCHECK(lcomm->state == kConnConnected);
         rcomm->base = lcomm->accept_buffer.base;
         rcomm->base.uccl_req_pool = std::make_shared<UcclRequestBuffPool>();
+        rcomm->base.uccl_stripe_pool = std::make_shared<UcclStripePool>();
         rcomm->remote_ip_str = lcomm->accept_buffer.remote_ip_str;
         rcomm->remote_vdev = lcomm->accept_buffer.remote_vdev;
         *recvComm = rcomm;
@@ -407,9 +421,20 @@ ncclResult_t pluginIsend(void *sendComm, void *data, int size, int tag,
     auto nr_stripes = (size + STRIPE_SIZE - 1) / STRIPE_SIZE;
     CHECK(nr_stripes <= MAX_NR_STRIPES);
     
-    *request = (struct UcclRequest *)malloc(sizeof(struct stripe_info));
+    // *request = (struct stripe_info *)malloc(sizeof(struct stripe_info));
+    {
+        uint64_t addr;
+        if (scomm->base.uccl_stripe_pool->alloc_buff(&addr)) {
+            CHECK(false);
+            *request = nullptr;
+            return ncclSuccess;
+        }
+        *request = reinterpret_cast<struct stripe_info *>(addr);
+    }
+
     auto stripe_info = (struct stripe_info *)*request;
     stripe_info->nr_stripes = nr_stripes;
+    stripe_info->stripe_pool = (void *)scomm->base.uccl_stripe_pool.get();
 
     auto remaining_size = size;
 
@@ -446,9 +471,19 @@ ncclResult_t pluginIrecv(void *recvComm, int n, void **data, int *sizes,
     auto nr_stripes = (sizes[0] + STRIPE_SIZE - 1) / STRIPE_SIZE;
     CHECK(nr_stripes <= MAX_NR_STRIPES);
 
-    *request = (struct UcclRequest *)malloc(sizeof(struct stripe_info));
+    // *request = (struct stripe_info *)malloc(sizeof(struct stripe_info));
+    {
+        uint64_t addr;
+        if (rcomm->base.uccl_stripe_pool->alloc_buff(&addr)) {
+            CHECK(false);
+            *request = nullptr;
+            return ncclSuccess;
+        }
+        *request = reinterpret_cast<struct stripe_info *>(addr);
+    }
     auto stripe_info = (struct stripe_info *)*request;
     stripe_info->nr_stripes = nr_stripes;
+    stripe_info->stripe_pool = (void *)rcomm->base.uccl_stripe_pool.get();
     
     for (int i = 0; i < nr_stripes; i++) {
         uint64_t addr;
@@ -520,9 +555,19 @@ ncclResult_t pluginIflush(void *recvComm, int n, void **data, int *sizes,
 
     DCHECK(n == 1);
 
-    *request = (struct UcclRequest *)malloc(sizeof(struct stripe_info));
+    // *request = (struct stripe_info *)malloc(sizeof(struct stripe_info));
+    {
+        uint64_t addr;
+        if (rcomm->base.uccl_stripe_pool->alloc_buff(&addr)) {
+            CHECK(false);
+            *request = nullptr;
+            return ncclSuccess;
+        }
+        *request = reinterpret_cast<struct stripe_info *>(addr);
+    }
     auto stripe_info = (struct stripe_info *)*request;
     stripe_info->nr_stripes = 1;
+    stripe_info->stripe_pool = (void *)rcomm->base.uccl_stripe_pool.get();
 
     uint64_t addr;
     auto vdev = rcomm->base.vdev;
@@ -580,8 +625,10 @@ ncclResult_t pluginTest(void *request, int *done, int *size) {
 
     *done = nr_done == nr_stripes;
 
-    if (*done)
-        free(stripe_info);
+    if (*done) {
+        auto uccl_stripe_pool = reinterpret_cast<UcclStripePool *>(stripe_info->stripe_pool);
+        uccl_stripe_pool->free_buff(reinterpret_cast<uint64_t>(stripe_info));
+    }
 
     return ncclSuccess;
 }

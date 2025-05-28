@@ -51,7 +51,7 @@ else
       LD_LIBRARY_PATH="/home/xzhiying/local_libs:${LD_LIBRARY_PATH}"
 
       NCCL_P2P_NET_CHUNKSIZE=131072
-      NCCL_P2P_NET_CHUNKSIZE=524288
+      # NCCL_P2P_NET_CHUNKSIZE=524288
       NCCL_BUFFSIZE=8388608
 
       COPY_CHANNELS=8
@@ -90,7 +90,7 @@ mpirun --bind-to none -np $SLURM_NNODES -N 1 \
       -x UCCL_ENGINE_QUIET=1 \
       ${NCCL_TESTS_PATH} \
       -f 2 -b 1K -e 1G \
-      -w 10 -n 20 \
+      -w 40 -n 20 \
       -c 0 -g 1 -t 1
 
 # -x NCCL_DEBUG=INFO \

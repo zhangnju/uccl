@@ -96,6 +96,10 @@ Next, you can dive into individual folders for various supports:
 
 Please refer to [doc/](./doc/README.md) for full documentation.
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=uccl-project/uccl&type=Date)](https://www.star-history.com/#uccl-project/uccl&Date)
+
 ## Citation
 The code in this repository is mostly described in the paper below. Please consider citing this work if you find the repository helpful. 
 

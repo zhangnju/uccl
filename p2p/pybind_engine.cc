@@ -5,8 +5,8 @@
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(uccl_p2p, m) {
-  m.doc() = "KVTrans Engine - High-performance RDMA-based key-value transport";
+PYBIND11_MODULE(p2p, m) {
+  m.doc() = "P2P Engine - High-performance RDMA-based peer-to-peer transport";
 
   // Endpoint class binding
   py::class_<Endpoint>(m, "Endpoint")
@@ -59,11 +59,43 @@ PYBIND11_MODULE(uccl_p2p, m) {
             size_t recv_size;
             bool success =
                 self.recv(conn_id, mr_id, reinterpret_cast<void*>(ptr),
-                          max_size, recv_size);
+                          max_size, &recv_size);
             return py::make_tuple(success, recv_size);
           },
           "Receive a key-value buffer", py::arg("conn_id"), py::arg("mr_id"),
           py::arg("ptr"), py::arg("max_size"))
+      .def(
+          "sendv",
+          [](Endpoint& self, uint64_t conn_id, std::vector<uint64_t> mr_id_v,
+             std::vector<uint64_t> data_ptr_v, std::vector<size_t> size_v,
+             size_t num_iovs) {
+            std::vector<void const*> data_v;
+            data_v.reserve(data_ptr_v.size());
+            for (uint64_t ptr : data_ptr_v) {
+              data_v.push_back(reinterpret_cast<void const*>(ptr));
+            }
+            return self.sendv(conn_id, mr_id_v, data_v, size_v, num_iovs);
+          },
+          "Send multiple data buffers", py::arg("conn_id"), py::arg("mr_id_v"),
+          py::arg("data_ptr_v"), py::arg("size_v"), py::arg("num_iovs"))
+      .def(
+          "recvv",
+          [](Endpoint& self, uint64_t conn_id, std::vector<uint64_t> mr_id_v,
+             std::vector<uint64_t> data_ptr_v, std::vector<size_t> max_size_v,
+             size_t num_iovs) {
+            std::vector<void*> data_v;
+            data_v.reserve(data_ptr_v.size());
+            for (uint64_t ptr : data_ptr_v) {
+              data_v.push_back(reinterpret_cast<void*>(ptr));
+            }
+            std::vector<size_t> recv_size_v(num_iovs);
+            bool success = self.recvv(conn_id, mr_id_v, data_v, max_size_v,
+                                      recv_size_v, num_iovs);
+            return py::make_tuple(success, recv_size_v);
+          },
+          "Receive multiple data buffers", py::arg("conn_id"),
+          py::arg("mr_id_v"), py::arg("data_ptr_v"), py::arg("max_size_v"),
+          py::arg("num_iovs"))
       .def("join_group", &Endpoint::join_group,
            "Join a rendezvous group: publish discovery info, wait for peers, "
            "and fully-connect",

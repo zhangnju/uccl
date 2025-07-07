@@ -1,4 +1,11 @@
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
+
+ext_modules = [
+    Extension(
+        name="uccl.p2p",
+        sources=[],
+    )
+]
 
 setup(
     name="uccl",
@@ -9,7 +16,10 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/uccl-project/uccl",
     packages=find_packages(),
-    package_data={"uccl": ["lib/*.so"]},
+    package_data={
+        "uccl": ["lib/*.so", "p2p*.so"],
+    },
+    ext_modules=ext_modules,
     license="Apache-2.0",
     install_requires=[
     ],

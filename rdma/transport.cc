@@ -243,7 +243,7 @@ void UcclRDMAEngine::handle_rx_work(void) {
     auto ureq = it.second;
 
     UCCL_LOG_ENGINE << "Process rx work.";
-    if (rdma_ctx->supply_rx_buff(rx_work.ureq) == 0) {
+    if (rdma_ctx->supply_rx_buff(ureq) == 0) {
       pending_rx_works_.pop_front();
     } else {
       UCCL_LOG_ENGINE << "Too many inflight recv requests.";
@@ -275,6 +275,11 @@ void UcclRDMAEngine::handle_rx_work(void) {
 
 inline void RDMAEndpoint::initialize_resources(int total_num_engines) {
   // Initialize all dynamic arrays
+  if (num_devices_ <= 0) {
+    printf("num_devices_ is 0.");
+    exit(EXIT_FAILURE);
+  }
+
   channel_vec_.resize(total_num_engines);
   engine_vec_.resize(total_num_engines);
   engine_load_vec_.resize(total_num_engines);
@@ -677,7 +682,13 @@ RDMAEndpoint::RDMAEndpoint(int num_engines_per_dev)
     : num_engines_per_dev_(num_engines_per_dev),
       stats_thread_([this]() { stats_thread_fn(); }) {
   static std::once_flag flag_once;
-  std::call_once(flag_once, [&]() { num_devices_ = RDMAFactory::init_devs(); });
+  std::call_once(flag_once, [&]() {
+    num_devices_ = RDMAFactory::init_devs();
+    if (num_devices_ <= 0) {
+      printf("Failed to initialize RDMA devices.\n");
+      exit(EXIT_FAILURE);
+    }
+  });
 
   rdma_ctl_ = rdma_ctl;
 
@@ -1947,9 +1958,9 @@ bool RDMAContext::receiverCC_tx_message(struct ucclRequest* ureq) {
     if (qpw->signal_cnt_++ % kSignalInterval == 0) {
       wr->send_flags = IBV_SEND_SIGNALED;
     }
-    if (size <= kMaxInline) {
-      wr->send_flags |= IBV_SEND_INLINE;
-    }
+    // if (size <= kMaxInline) {
+    //   wr->send_flags |= IBV_SEND_INLINE;
+    // }
     wr_ex->qpidx = qpidx;
 
     struct ibv_send_wr* bad_wr;
@@ -2045,9 +2056,9 @@ bool RDMAContext::senderCC_tx_message(struct ucclRequest* ureq) {
       if (qpw->signal_cnt_++ % kSignalInterval == 0) {
         wr->send_flags = IBV_SEND_SIGNALED;
       }
-      if (size <= kMaxInline) {
-        wr->send_flags |= IBV_SEND_INLINE;
-      }
+      // if (size <= kMaxInline) {
+      //   wr->send_flags |= IBV_SEND_INLINE;
+      // }
       wr_ex->qpidx = qpidx;
 
       struct ibv_send_wr* bad_wr;
@@ -2148,9 +2159,9 @@ bool RDMAContext::senderCC_tx_message(struct ucclRequest* ureq) {
         if (qpw->signal_cnt_++ % kSignalInterval == 0) {
           wr_ex->wr.send_flags = IBV_SEND_SIGNALED;
         }
-        if (size <= kMaxInline) {
-          wr_ex->wr.send_flags |= IBV_SEND_INLINE;
-        }
+        // if (size <= kMaxInline) {
+        //   wr_ex->wr.send_flags |= IBV_SEND_INLINE;
+        // }
         wr_ex->qpidx = qpidx;
         struct ibv_send_wr* bad_wr;
         auto ret = ibv_post_send(qpw->qp, wr, &bad_wr);

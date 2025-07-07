@@ -11,8 +11,8 @@ CXXFLAGS := -O3 -shared -std=c++17 -fPIC -I../include -I../rdma -I$(CUDA_INC) \
 	-DLAZY_CREATE_ENGINE
 
 # Python and pybind11 configuration
-PYTHON := python3
-PYTHON_CONFIG := python3-config
+PYTHON          ?= python3
+PYTHON_CONFIG    = $(PYTHON)-config
 PYEXT           := $(shell $(PYTHON_CONFIG) --extension-suffix)
 PYBIND11_INCLUDES := $(shell $(PYTHON) -m pybind11 --includes)
 PYTHON_LDFLAGS := $(shell $(PYTHON_CONFIG) --ldflags)
@@ -27,7 +27,7 @@ LDFLAGS         = -L$(CUDA_LIB) -lcudart -lcuda $(REDIS_LIBS) \
                   -lz -lelf -libverbs -lpthread
 
 # Target and source files
-TARGET   := uccl_p2p$(PYEXT)
+TARGET   := p2p$(PYEXT)
 SOURCES := engine.cc pybind_engine.cc
 OBJECTS := $(SOURCES:.cc=.o)
 

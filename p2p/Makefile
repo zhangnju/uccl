@@ -17,6 +17,10 @@ PYEXT           := $(shell $(PYTHON_CONFIG) --extension-suffix)
 PYBIND11_INCLUDES := $(shell $(PYTHON) -m pybind11 --includes)
 PYTHON_LDFLAGS := $(shell $(PYTHON_CONFIG) --ldflags)
 
+# Python installation path
+PYTHON_SITE_PACKAGES := $(shell $(PYTHON) -c "import site; print(site.getsitepackages()[0])")
+INSTALL_DIR          := $(PYTHON_SITE_PACKAGES)/uccl
+
 # Redis
 REDIS_PKGCONFIG := pkg-config
 REDIS_CFLAGS    := $(shell $(REDIS_PKGCONFIG) --cflags hiredis redis++)
@@ -49,6 +53,13 @@ $(TARGET): $(OBJECTS) ../rdma/librdma.a
 %.o: %.cc
 	$(CXX) $(CXXFLAGS) $(PYBIND11_INCLUDES) -c $< -o $@
 
+# Install the module
+install: $(TARGET)
+	@echo "Installing p2p module to $(INSTALL_DIR)"
+	@mkdir -p $(INSTALL_DIR)
+	@cp $(TARGET) $(INSTALL_DIR)/
+	@echo "Installation complete. Module installed as: $(INSTALL_DIR)/$(TARGET)"
+
 # Clean build artifacts
 clean:
 	rm -f $(OBJECTS) $(TARGET)
@@ -66,9 +77,10 @@ install-deps:
 help:
 	@echo "Available targets:"
 	@echo "  all          - Build the pybind11 module"
+	@echo "  install      - Install the module to Python site-packages"
 	@echo "  clean        - Remove build artifacts"
 	@echo "  test         - Run the test script"
 	@echo "  install-deps - Install pybind11 dependency"
 	@echo "  help         - Show this help message"
 
-.PHONY: all clean test install-deps help 
+.PHONY: all clean test install-deps help install 

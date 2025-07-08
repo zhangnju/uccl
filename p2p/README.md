@@ -87,6 +87,12 @@ sudo make install
    ```
 ## Performance Benchmarks
 
+Navigate to benchmarks directory:
+
+```bash
+cd benchmarks
+```
+
 ### Running UCCL P2P
 
 On server: 

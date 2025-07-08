@@ -55,7 +55,6 @@ $(TARGET): $(OBJECTS) ../rdma/librdma.a
 
 # Install the module
 install: $(TARGET)
-	@echo "Installing p2p module to $(INSTALL_DIR)"
 	@mkdir -p $(INSTALL_DIR)
 	@cp $(TARGET) $(INSTALL_DIR)/
 	@echo "Installation complete. Module installed as: $(INSTALL_DIR)/$(TARGET)"

@@ -71,7 +71,7 @@ sudo make install
    make install-deps
    ```
 
-2. **Build the module:**
+2. **Build the UCCL P2P module:**
    ```bash
    make
    ```
@@ -81,42 +81,54 @@ sudo make install
    make test
    ```
 
+4. **Install the UCCL P2P module:**
+   ```bash
+   make install
+   ```
 ## Performance Benchmarks
 
 ### Running UCCL P2P
 
-On client:
-```bash
-# Note: if running atop GH200 with unified memory, use `--device cpu` or use `cudaMallocManaged`. 
-python benchmark.py \
-    --role client --remote-ip 192.168.0.100 --device gpu \
-    --local-gpu-idx 0 --remote-gpu-idx 0 --num-cpus 4
-```
 On server: 
 ```bash
 python benchmark.py --role server --local-gpu-idx 0 --num-cpus 4
 ```
 
-### Running NCCL
+On client:
 ```bash
-NCCL_NCHANNELS_PER_NET_PEER=4 python benchmark_nccl.py \
-    --role client --remote-ip 192.168.0.100 --device gpu \
-    --local-gpu-idx 0
+# Note: if running atop GH200 with unified memory, use `--device cpu` or use `cudaMallocManaged`. 
+python benchmark.py \
+    --role client --remote-ip <Server IP> --device gpu \
+    --local-gpu-idx 0 --remote-gpu-idx 0 --num-cpus 4
+```
 
+
+### Running NCCL
+
+On Server:
+```bash
 NCCL_NCHANNELS_PER_NET_PEER=4 \
 python benchmark_nccl.py --role server --local-gpu-idx 0
 ```
+
+On Client:
+```bash
+NCCL_NCHANNELS_PER_NET_PEER=4 python benchmark_nccl.py \
+    --role client --remote-ip <Server IP> --device gpu \
+    --local-gpu-idx 0
+```
+
 
 ## Usage Examples
 
 ### Basic Endpoint Setup
 
 ```python
-import uccl_p2p
+from uccl import p2p
 import torch
 
 # Create endpoint with local GPU index and number of CPUs
-endpoint = uccl_p2p.Endpoint(local_gpu_idx=0, num_cpus=4)
+endpoint = p2p.Endpoint(local_gpu_idx=0, num_cpus=4)
 ```
 
 ### Client-Server Communication
@@ -364,6 +376,7 @@ Receive multiple memory regions from remote endpoint in a single operation (bloc
 ### Build Targets
 ```bash
 make all          # Build the module
+make install      # Installs the module in python package path
 make clean        # Clean build artifacts  
 make test         # Run test suite
 make install-deps # Install Python dependencies

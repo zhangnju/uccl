@@ -6,10 +6,8 @@ import time
 from typing import List
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 try:
-    import p2p
+    from uccl import p2p
 except ImportError as exc:
     sys.stderr.write("Failed to import p2p\n")
     raise

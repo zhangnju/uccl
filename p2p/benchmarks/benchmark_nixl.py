@@ -14,15 +14,12 @@ except ImportError as exc:
     sys.stderr.write("Failed to import NIXL\n")
     raise
 
-_HAS_TORCH = False
 try:
     import torch
+except ImportError as exc:
+    sys.stderr.write("Failed to import torch\n")
+    raise
 
-    print("Torch imported")
-
-    _HAS_TORCH = True
-except ModuleNotFoundError:
-    pass
 
 import numpy as np
 
@@ -171,7 +168,6 @@ def cleanup_transfer(
 def cleanup_agent(
         agent: nixl_agent,
     ):
-    # Cleanup the agent
     agent.remove_remote_agent(agent.name)
 
 def start_agent_pair(size, args):
@@ -193,8 +189,8 @@ def start_agent_pair(size, args):
             zmq_socket
         )
         
-        start = time.perf_counter()
         total_size = 0
+        start = time.perf_counter()
         for n in range(args.iters):
             start_transfer(
                 args.role,
@@ -250,7 +246,7 @@ def parse_size_list(val: str) -> List[int]:
 
 def main():
     p = argparse.ArgumentParser(
-        description="Benchmark UCCL P2P Engine bandwidth"
+        description="Benchmark NIXL/UCX bandwidth"
     )
     p.add_argument(
         "--role",
@@ -274,9 +270,6 @@ def main():
         type=int,
         default=0,
         help="Local GPU index to bind buffers",
-    )
-    p.add_argument(
-        "--num-cpus", type=int, default=4, help="#CPU threads for RDMA ops"
     )
     p.add_argument(
         "--device",

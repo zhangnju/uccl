@@ -108,6 +108,21 @@ python benchmark.py \
     --local-gpu-idx 0 --remote-gpu-idx 0 --num-cpus 4
 ```
 
+### Running NIXL
+
+On Server:
+```bash
+UCX_TLS=cuda_ipc,cuda_copy,rc,tcp \
+python benchmark_nixl.py --role server --local-gpu-idx 0
+```
+
+On Client:
+```bash
+UCX_TLS=cuda_ipc,cuda_copy,rc,tcp python benchmark_nixl.py \
+    --role client --remote-ip <Server IP> --device gpu \
+    --local-gpu-idx 0
+```
+
 
 ### Running NCCL
 

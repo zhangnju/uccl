@@ -3,13 +3,12 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-import zmq
 from typing import List
 import traceback
 from datetime import datetime
 
 try:
-    from nixl._api import nixl_agent
+    from nixl._api import nixl_agent, nixl_agent_config
 except ImportError as exc:
     sys.stderr.write("Failed to import NIXL\n")
     raise
@@ -23,7 +22,7 @@ except ImportError as exc:
 
 import numpy as np
 
-def create_dataset(role, size, device):
+def create_dataset(role, size, device, gpu_idx=0):
     """
     Create a dataset of tensors whose total size is at least size in bytes.
     """
@@ -37,8 +36,12 @@ def create_dataset(role, size, device):
         n_elems_per_block = 1
 
     dataset = []
+    if device == "gpu":
+        dev = f"cuda:{gpu_idx}"
+    else:
+        dev = "cpu"
     for _ in range(num_blocks):
-        block = torch.full((n_elems_per_block,), value, device=device, dtype=dtype)
+        block = torch.full((n_elems_per_block,), value, device=dev, dtype=dtype)
         dataset.append(block)
 
     # If total size is less than requested, add more elements to the last block
@@ -51,91 +54,68 @@ def create_dataset(role, size, device):
 
     return dataset
 
-def init_zmq(host, port, role):
-    """
-    Initialize the ZMQ socket for communication.
-    """
-    context = zmq.Context()
-    zmq_socket = context.socket(zmq.PAIR)
-    if "server" in role:
-        zmq_socket.bind(f"tcp://{host}:{port}")
-    else:
-        zmq_socket.connect(f"tcp://{host}:{port}")
-        # Ensure the socket is ready to receive messages
-        zmq_socket.setsockopt(zmq.LINGER, 0)
-
-    return zmq_socket
-
 def initialize_xfer_metadata(
         role: str,
         operation: str, 
         agent: nixl_agent, 
-        peer_name: str, 
         register_descs,
-        zmq_socket
+        server_ip,
+        server_port
     ):
     """
     Initialize transfer metadata.
     """
+
     local_xfer_descs = register_descs.trim()
     remote_xfer_descs = None
     transfer_handle = None
 
     if "server" in role:
         # Wait until there is a message from the creator
-        msg = zmq_socket.recv().decode("utf-8")
-        if msg == "START":
-            pass
-        else:
-            print(f"{role} received unexpected message: {msg}")
-            zmq_socket.close()
-            exit(0)
+        while not agent.check_remote_metadata("client"):
+            continue
 
         # send the xfer descs to the peer
-        zmq_socket.send(agent.get_serialized_descs(local_xfer_descs))
+        desc = agent.get_serialized_descs(local_xfer_descs)
+        agent.send_notif("client", desc)
 
     elif "client" in role:
-        zmq_socket.send("START".encode("utf-8"))
-
+        agent.fetch_remote_metadata("server", server_ip, server_port)
+        agent.send_local_metadata(server_ip, server_port)
         # Wait until there is a message from the peer
-        msg = zmq_socket.recv()
-        remote_xfer_descs = agent.deserialize_descs(msg)
+        notifs = agent.get_new_notifs()
+        while len(notifs) == 0:
+            notifs = agent.get_new_notifs()
 
+        remote_xfer_descs = agent.deserialize_descs(notifs["server"][0])
+        while not agent.check_remote_metadata("server"):
+            continue
         uid = "TRANSFER"
         transfer_handle = agent.initialize_xfer(
                 operation,
                 local_xfer_descs,
                 remote_xfer_descs,
-                peer_name,
+                "server",
                 uid)
 
     return transfer_handle
 
-def create_nixl_agents(role: str, dataset: np.ndarray, zmq_socket):
+def create_nixl_agent(role: str, dataset):
     """
     Create Nixl agents based on the role.
     """
-    agent = nixl_agent(role)
-    descs = agent.get_reg_descs(dataset, "cuda")
-    register_descs = agent.register_memory(descs, "cuda")
-    local_meta = agent.get_agent_metadata()
-
-    if "client" in role:
-        zmq_socket.send(local_meta)
-        remote_meta = zmq_socket.recv()
-        peer_name = agent.add_remote_agent(remote_meta).decode("utf-8")
-    elif "server" in role:
-        remote_meta = zmq_socket.recv()
-        peer_name = agent.add_remote_agent(remote_meta).decode("utf-8")
-        zmq_socket.send(local_meta)
-
-    return agent, peer_name, register_descs
+    port = 9000
+    listen_port = port if role == "server" else 0
+    config = nixl_agent_config(True, True, listen_port)
+    agent = nixl_agent(role, config)
+    descs = agent.get_reg_descs(dataset)
+    register_descs = agent.register_memory(descs)
+    return agent, register_descs
 
 def start_transfer(
         role: str,
         agent: nixl_agent,
         transfer_handle,
-        peer_name,
     ):
     if "client" in role:
         state = agent.transfer(transfer_handle)
@@ -150,7 +130,7 @@ def start_transfer(
                 break
     else:
         uid = "TRANSFER"
-        while not agent.check_remote_xfer_done(peer_name, uid.encode("utf-8")):
+        while not agent.check_remote_xfer_done("client", uid.encode("utf-8")):
             continue
 
 
@@ -173,20 +153,19 @@ def cleanup_agent(
 def start_agent_pair(size, args):
     op = 'READ'
     port = 9000
-    zmq_socket = init_zmq(args.remote_ip, port, args.role)
     
     try:
-        dataset = create_dataset(args.role, size, args.local_gpu_idx)
-        
-        agent, peer_name, register_descs = create_nixl_agents(args.role, dataset, zmq_socket)
+        dataset = create_dataset(args.role, size, args.device, args.local_gpu_idx)
+
+        agent, register_descs = create_nixl_agent(args.role, dataset)
 
         transfer_handle = initialize_xfer_metadata(
             args.role,
             op,
             agent,
-            peer_name,
             register_descs,
-            zmq_socket
+            args.remote_ip,
+            port
         )
         
         total_size = 0
@@ -196,7 +175,6 @@ def start_agent_pair(size, args):
                 args.role,
                 agent,
                 transfer_handle,
-                peer_name,
             )
             total_size += size
         end = time.perf_counter()
@@ -223,8 +201,6 @@ def start_agent_pair(size, args):
             register_descs,
         )
         cleanup_agent(agent)
-
-        zmq_socket.close()
 
 def _pretty_size(num_bytes: int) -> str:
     units = ["B", "KB", "MB", "GB"]

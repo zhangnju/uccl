@@ -746,7 +746,6 @@ RDMAEndpoint::RDMAEndpoint(int num_engines_per_dev)
 
     engine_cpu_id =
         ENGINE_CPU_START_LIST[dev] + engine_id % num_engines_per_dev;
-    DCHECK(engine_cpu_id < NUM_CPUS) << engine_cpu_id << ", " << NUM_CPUS;
 
     engine_vec_.emplace_back(std::make_unique<UcclRDMAEngine>(
         dev, engine_id, channel_vec_[engine_id], eqds_[dev]));
@@ -759,6 +758,9 @@ RDMAEndpoint::RDMAEndpoint(int num_engines_per_dev)
                             << "running on NUMA node " << numa_node;
             pin_thread_to_numa(numa_node);
           } else {
+            DCHECK(engine_cpu_id < NUM_CPUS)
+                << "The target CPU id " << engine_cpu_id
+                << " is out of range, available CPUs:" << NUM_CPUS;
             UCCL_LOG_ENGINE << "[Engine#" << engine_id << "] "
                             << "running on CPU " << engine_cpu_id;
             pin_thread_to_cpu(engine_cpu_id);
@@ -792,7 +794,6 @@ bool RDMAEndpoint::initialize_engine_by_dev(int dev) {
          engine_id++) {
       int engine_cpu_id =
           ENGINE_CPU_START_LIST[dev] + engine_id % num_engines_per_dev_;
-      DCHECK(engine_cpu_id < NUM_CPUS) << engine_cpu_id << ", " << NUM_CPUS;
       UcclRDMAEngine* engine_ptr;
       {
         std::lock_guard<std::mutex> lock(engine_map_mu_);
@@ -815,6 +816,9 @@ bool RDMAEndpoint::initialize_engine_by_dev(int dev) {
                                 << "running on NUMA node " << numa_node;
                 pin_thread_to_numa(numa_node);
               } else {
+                DCHECK(engine_cpu_id < NUM_CPUS)
+                    << "The target CPU id " << engine_cpu_id
+                    << " is out of range, available CPUs:" << NUM_CPUS;
                 UCCL_LOG_ENGINE << "[Engine#" << engine_id << "] "
                                 << "running on CPU " << engine_cpu_id;
                 pin_thread_to_cpu(engine_cpu_id);
@@ -2843,12 +2847,7 @@ void RDMAContext::uc_rx_rtx_chunk(struct ibv_wc* wc, uint64_t chunk_addr) {
     return;
   }
 
-  auto bitmap_bucket_idx = distance.to_uint32() / PCB::kSackBitmapBucketSize;
-  auto cursor = distance.to_uint32() % PCB::kSackBitmapBucketSize;
-  auto sack_bitmap = &subflow->pcb.sack_bitmap[bitmap_bucket_idx];
-
-  if ((*sack_bitmap & (1ULL << cursor))) {
-    // Original chunk is already received.
+  if (subflow->pcb.sack_bitmap_bit_is_set(distance.to_uint32())) {
     UCCL_LOG_IO << "Original chunk is already received. Dropping "
                    "retransmission chunk for flow"
                 << fid;
@@ -2958,12 +2957,7 @@ void RDMAContext::uc_rx_rtx_chunk(struct ibv_cq_ex* cq_ex,
     return;
   }
 
-  auto bitmap_bucket_idx = distance.to_uint32() / PCB::kSackBitmapBucketSize;
-  auto cursor = distance.to_uint32() % PCB::kSackBitmapBucketSize;
-  auto sack_bitmap = &subflow->pcb.sack_bitmap[bitmap_bucket_idx];
-
-  if ((*sack_bitmap & (1ULL << cursor))) {
-    // Original chunk is already received.
+  if (subflow->pcb.sack_bitmap_bit_is_set(distance.to_uint32())) {
     UCCL_LOG_IO << "Original chunk is already received. Dropping "
                    "retransmission chunk for flow"
                 << fid;
@@ -3160,6 +3154,15 @@ void RDMAContext::uc_rx_chunk(struct ibv_wc* wc) {
     return;
   }
 
+  // It's impossible to receive duplicate OOO chunks in uc_rx_chunk().
+  // This is because the rtx chunk is retransmitted after the original chunk
+  // using the same QP. According to the nature of UC QP, if the original chunk
+  // is not lost, the original chunk is always handled before its corresponding
+  // rtx chunk. In addition, all rtx chunks are handled in uc_rx_rtx_chunk()
+  // rather than uc_rx_chunk(). Therefore, there is no need for us to check
+  // duplicate OOO chunks here. But uc_rx_rtx_chunk() needs to handle this case.
+  DCHECK(!subflow->pcb.sack_bitmap_bit_is_set(distance.to_uint32()));
+
   // Always use the latest timestamp.
   subflow->pcb.t_remote_nic_rx = now;
 
@@ -3255,6 +3258,15 @@ void RDMAContext::uc_rx_chunk(struct ibv_cq_ex* cq_ex) {
     subflow->pcb.stats_chunk_drop++;
     return;
   }
+
+  // It's impossible to receive duplicate OOO chunks in uc_rx_chunk().
+  // This is because the rtx chunk is retransmitted after the original chunk
+  // using the same QP. According to the nature of UC QP, if the original chunk
+  // is not lost, the original chunk is always handled before its corresponding
+  // rtx chunk. In addition, all rtx chunks are handled in uc_rx_rtx_chunk()
+  // rather than uc_rx_chunk(). Therefore, there is no need for us to check
+  // duplicate OOO chunks here. But uc_rx_rtx_chunk() needs to handle this case.
+  DCHECK(!subflow->pcb.sack_bitmap_bit_is_set(distance.to_uint32()));
 
   // Always use the latest timestamp.
   if constexpr (kTestNoHWTimestamp)

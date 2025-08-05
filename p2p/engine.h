@@ -7,7 +7,8 @@
 #include "util/util.h"
 #include <infiniband/verbs.h>
 #include <pybind11/pybind11.h>
-#include <mutex>
+#include <atomic>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -114,7 +115,8 @@ class Endpoint {
    *   data: the data to send
    *   size: the size of the data
    */
-  bool send(uint64_t conn_id, uint64_t mr_id, void const* data, size_t size);
+  bool send(uint64_t conn_id, uint64_t mr_id, void const* data, size_t size,
+            bool inside_python = true);
 
   /*
    * Receive data from the remote server. Blocking.
@@ -126,7 +128,8 @@ class Endpoint {
    *   data: the data to receive
    *   size: the size of the data
    */
-  bool recv(uint64_t conn_id, uint64_t mr_id, void* data, size_t size);
+  bool recv(uint64_t conn_id, uint64_t mr_id, void* data, size_t size,
+            bool inside_python = true);
 
   bool send_ipc(uint64_t conn_id, uint64_t mr_id, void const* data, size_t size,
                 void const* meta, size_t meta_len);
@@ -159,7 +162,7 @@ class Endpoint {
    *   slot_item: the slot item to use for the transfer
    */
   bool read(uint64_t conn_id, uint64_t mr_id, void* dst, size_t size,
-            uccl::FifoItem const& slot_item);
+            uccl::FifoItem const& slot_item, bool inside_python = true);
 
   /* Read data from the remote server asynchronously. */
   bool read_async(uint64_t conn_id, uint64_t mr_id, void* dst, size_t size,
@@ -231,6 +234,7 @@ class Endpoint {
   int local_gpu_idx_;
   int remote_gpu_idx_;
   uint32_t num_cpus_;
+  int numa_node_;
 
   uccl::RDMAEndpoint* ep_;
 
@@ -238,17 +242,58 @@ class Endpoint {
   std::atomic<uint64_t> next_mr_id_ = 0;
   std::atomic<uint64_t> next_transfer_id_ = 0;
 
-  // TODO(yang): add mutex to protect the maps.
-  mutable std::mutex conn_mu_;
-
+  // Accessed by both app thread and proxy thread.
+  mutable std::shared_mutex conn_mu_;
   std::unordered_map<uint64_t, Conn*> conn_id_to_conn_;
+  mutable std::shared_mutex mr_mu_;
   std::unordered_map<uint64_t, MR*> mr_id_to_mr_;
-  std::unordered_map<uint64_t, uccl::ucclRequest*> transfer_id_to_ureq_;
 
+  // Single-threaded.
   std::unordered_map<int, uint64_t> rank2conn_;
 
   // Assuming 1TB GPU memory, 128KB KV block size.
   static constexpr size_t kMaxNumChunksPerTransfer = 1024ul * 1024 * 1024 / 128;
   std::atomic<uint32_t> rr_stream_{0};
   std::vector<gpuStream_t> streams_;
+
+  static constexpr size_t kTaskRingSize = 1024;
+
+  enum class TaskType {
+    SEND,
+    RECV,
+    READ,
+  };
+
+  struct alignas(64) Task {
+    TaskType type;
+    void* data;
+    size_t size;
+    uint64_t conn_id;
+    uint64_t mr_id;
+    std::atomic<bool> done;
+    // For proxy to access the task.done
+    Task* self_ptr;
+  };
+
+  struct alignas(64) ReadTask {
+    TaskType type;
+    void* data;
+    size_t size;
+    uint64_t conn_id;
+    uint64_t mr_id;
+    std::atomic<bool> done;
+    // For proxy to access the task.done
+    ReadTask* self_ptr;
+    uccl::FifoItem slot_item;
+  };
+
+  jring_t* send_task_ring_;
+  jring_t* recv_task_ring_;
+  jring_t* read_task_ring_;
+
+  std::atomic<bool> stop_{false};
+  std::thread send_proxy_thread_;
+  std::thread recv_proxy_thread_;
+  void send_proxy_thread_func();
+  void recv_proxy_thread_func();
 };

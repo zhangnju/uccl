@@ -23,7 +23,8 @@ from uccl import collective
 def _make_buffer(size_bytes: int):
     """Allocate a contiguous GPU tensor of *size_bytes* and return it."""
     n_elems = size_bytes // 4  # float32
-    tensor = torch.ones(n_elems, dtype=torch.float32)
+    tensor = torch.ones(n_elems, dtype=torch.float32).cuda()
+    assert tensor.device.type == "cuda"
     return tensor
 
 
@@ -156,6 +157,56 @@ def _run_async_client(args):
     print("[Client Async] Benchmark complete")
 
 
+def _run_dual_benchmark(args):
+    """Demonstrate dual-direction async communication (both isend and irecv simultaneously)."""
+    rank = dist.get_rank()
+    peer = 1 - rank  # peer rank (0 <-> 1)
+
+    for size in args.sizes:
+        send_tensor = _make_buffer(size)
+        recv_tensor = _make_buffer(size)
+
+        # Register tensors for efficient memory access
+        collective.register_tensor(send_tensor)
+        collective.register_tensor(recv_tensor)
+
+        # Warm-up: simultaneous send and receive
+        send_req = collective.isend(send_tensor, dst=peer)
+        recv_req = collective.irecv(recv_tensor, src=peer)
+        collective.wait_all([send_req, recv_req])
+
+        start = time.perf_counter()
+        total_sent = 0
+        total_recv = 0
+
+        for _ in range(args.iters):
+            # Start both operations simultaneously
+            send_req = collective.isend(send_tensor, dst=peer)
+            recv_req = collective.irecv(recv_tensor, src=peer)
+
+            # Wait for both to complete
+            collective.wait_all([send_req, recv_req])
+
+            total_sent += size
+            total_recv += size
+
+        elapsed = time.perf_counter() - start
+
+        role_name = "Client" if rank == 0 else "Server"
+        # Calculate individual send/recv throughput
+        send_gbps = (total_sent * 8) / elapsed / 1e9
+        send_gb_sec = total_sent / elapsed / 1e9
+        recv_gbps = (total_recv * 8) / elapsed / 1e9
+        recv_gb_sec = total_recv / elapsed / 1e9
+
+        print(
+            f"[{role_name} Dual Send Recv] {_pretty_size(size):>9} : {(send_gbps + recv_gbps) / 2:6.2f} Gbps | {(send_gb_sec + recv_gb_sec) / 2:5.2f} GB/s"
+        )
+
+    role_name = "Client" if rank == 0 else "Server"
+    print(f"[{role_name} Dual] Benchmark complete")
+
+
 def parse_size_list(val: str) -> List[int]:
     try:
         return [int(s) for s in val.split(",") if s]
@@ -180,6 +231,7 @@ def main():
             262144,
             1048576,
             10485760,
+            16 * 1024 * 1024,
             104857600,
         ],
     )
@@ -188,6 +240,11 @@ def main():
         "--async-api",
         action="store_true",
         help="Use async API (isend/irecv/wait)",
+    )
+    p.add_argument(
+        "--dual",
+        action="store_true",
+        help="Test bidirectional communication (simultaneous isend and irecv).",
     )
     args = p.parse_args()
 
@@ -213,10 +270,16 @@ def main():
         )
         print("Message sizes:", ", ".join(_pretty_size(s) for s in args.sizes))
         print(f"Device: GPU | Local GPU idx: {local_gpu_idx} | Iters: {args.iters}")
-        if args.async_api:
+        if args.dual:
+            print("Using dual-direction mode (simultaneous isend/irecv)")
+        elif args.async_api:
             print("Using async API (isend/irecv/wait)")
+        else:
+            print("Using synchronous API (send/recv)")
 
-        if args.async_api:
+        if args.dual:
+            _run_dual_benchmark(args)
+        elif args.async_api:
             if rank == 0:
                 _run_async_client(args)
             else:

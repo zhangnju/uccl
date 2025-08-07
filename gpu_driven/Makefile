@@ -6,6 +6,11 @@ PYTHON            ?= python3
 PYBIND11_INCLUDES := $(shell $(PYTHON) -m pybind11 --includes)
 EXT_SUFFIX        := $(shell $(PYTHON) -c "import sysconfig as s; print(s.get_config_var('EXT_SUFFIX') or '.so')")
 
+TORCH_INCLUDE      := $(shell $(PYTHON) -c "import torch, pathlib; p=pathlib.Path(torch.__file__).parent; print(p/'include')")
+TORCH_INCLUDE_API  := $(shell $(PYTHON) -c "import torch, pathlib; p=pathlib.Path(torch.__file__).parent; print(p/'include/torch/csrc/api/include')")
+TORCH_LIBDIR       := $(shell $(PYTHON) -c "import torch, pathlib; p=pathlib.Path(torch.__file__).parent; print(p/'lib')")
+TORCH_ABI          := $(shell $(PYTHON) -c "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))")
+
 # GPU arch (override with: make SM=90)
 SM ?= 90
 
@@ -35,6 +40,20 @@ PYBIND_OBJ := $(PYBIND_SRC:.cc=.o)
 UCCL_EP_SRC := src/uccl_ep.cc
 UCCL_EP_OBJ := $(UCCL_EP_SRC:.cc=.o)
 UCCL_EP_EXT := uccl_ep$(EXT_SUFFIX)
+
+$(UCCL_EP_OBJ): $(UCCL_EP_SRC)
+	$(CXX) $(CXXFLAGS) -D_GLIBCXX_USE_CXX11_ABI=$(TORCH_ABI) \
+	    -I$(TORCH_INCLUDE) -I$(TORCH_INCLUDE_API) \
+	    $(INCLUDES) $(PYBIND11_INCLUDES) -MMD -MP -c $< -o $@
+
+$(UCCL_EP_EXT): $(UCCL_EP_OBJ)
+	$(CXX) $(CXXFLAGS) -shared -fPIC \
+	    -D_GLIBCXX_USE_CXX11_ABI=$(TORCH_ABI) \
+	    $(INCLUDES) $(PYBIND11_INCLUDES) $^ \
+	    -L$(TORCH_LIBDIR) -Wl,-rpath,$(TORCH_LIBDIR) \
+	    -ltorch_python \
+	    -ltorch -ltorch_cpu -ltorch_cuda -lc10 -lc10_cuda \
+	    -o $@
 
 TARGET_LOCAL  := benchmark_local
 TARGET_REMOTE := benchmark_remote
@@ -70,10 +89,6 @@ SRC_CU  := src/gpu_kernel.cu src/peer_copy.cu src/py_cuda_shims.cu
 $(PYTARGET): $(OBJ_CPP) $(OBJ_CU) src/pybind_proxy.o
 	$(NVCC) -arch=sm_$(SM) $(NVCCFLAGS) -shared -Xcompiler "-fPIC" \
 	  $(INCLUDES) $(PYBIND11_INCLUDES) $^ -lcuda -lcudart $(LDFLAGS) -o $@
-
-$(UCCL_EP_EXT): $(UCCL_EP_OBJ)
-	$(CXX) $(CXXFLAGS) -shared -fPIC $(INCLUDES) $(PYBIND11_INCLUDES) \
-	-DHAVE_UCCL $^ -o $@
 
 py: $(PYTARGET) $(UCCL_EP_EXT)
 

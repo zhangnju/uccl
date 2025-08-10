@@ -24,7 +24,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
     int* next_clean, int num_next_clean_int, int num_tokens,
     int num_max_dispatch_tokens_per_rank, int num_topk, int num_experts,
     int rank, int num_ranks, int num_warp_groups, int num_warps_per_group,
-    bool round_scale, int phases) {
+    bool round_scale, int phases, uint64_t const* ring_addrs,
+    int num_ring_addrs) {
   auto const sm_id = static_cast<int>(blockIdx.x);
   auto const thread_id = static_cast<int>(threadIdx.x);
   auto const warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -54,7 +55,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
   const size_t num_bytes_per_msg =
       sizeof(int4) + (kUseFP8 ? (kHidden + num_scales * sizeof(float))
                               : (kHidden * sizeof(nv_bfloat16)));
-  const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
+  // const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);  //
+  // NOTE(MaoZiming): not used
   EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
 
   // Expert counts
@@ -408,7 +410,8 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0, void* workspace,
-              int num_device_sms, cudaStream_t stream, int phases) {
+              int num_device_sms, cudaStream_t stream, int phases,
+              uint64_t const* ring_addrs, int num_ring_addrs) {
   constexpr int kNumMaxTopK = 9;
   int const num_warp_groups = ceil_div(num_experts, num_device_sms);
   int const num_warps_per_group = 32 / num_warp_groups;
@@ -435,20 +438,27 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
     if (use_fp8 and not use_ue8m0)                                             \
       dispatch_func = dispatch<true, false, hidden>;                           \
     if (use_fp8 and use_ue8m0) dispatch_func = dispatch<true, true, hidden>;   \
-    LAUNCH_KERNEL(                                                             \
-        &cfg, dispatch_func, packed_recv_x, packed_recv_x_scales,              \
-        packed_recv_src_info, packed_recv_layout_range, packed_recv_count,     \
-        cumulative_local_expert_recv_stats, dispatch_wait_recv_cost_stats,     \
-        rdma_recv_x, rdma_recv_count, rdma_x, x, topk_idx,                     \
-        atomic_counter_per_expert, atomic_finish_counter_per_expert,           \
-        next_clean, num_next_clean_int, num_tokens,                            \
-        num_max_dispatch_tokens_per_rank, num_topk, num_experts, rank,         \
-        num_ranks, num_warp_groups, num_warps_per_group, round_scale, phases); \
+    LAUNCH_KERNEL(&cfg, dispatch_func, packed_recv_x, packed_recv_x_scales,    \
+                  packed_recv_src_info, packed_recv_layout_range,              \
+                  packed_recv_count, cumulative_local_expert_recv_stats,       \
+                  dispatch_wait_recv_cost_stats, rdma_recv_x, rdma_recv_count, \
+                  rdma_x, x, topk_idx, atomic_counter_per_expert,              \
+                  atomic_finish_counter_per_expert, next_clean,                \
+                  num_next_clean_int, num_tokens,                              \
+                  num_max_dispatch_tokens_per_rank, num_topk, num_experts,     \
+                  rank, num_ranks, num_warp_groups, num_warps_per_group,       \
+                  round_scale, phases, ring_addrs, num_ring_addrs);            \
   }                                                                            \
   break
 
   SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
   SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
+  auto err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    printf("[dispatch] kernel launch error: %s\n", cudaGetErrorString(err));
+    fflush(stdout);
+  }
+
 #undef DISPATCH_LAUNCH_CASE
 }
 
@@ -461,7 +471,8 @@ __global__ __launch_bounds__(1024, 1) void combine(
     int num_next_clean_int, int* atomic_clean_flag, int num_combined_tokens,
     int hidden, int num_topk, int num_max_dispatch_tokens_per_rank,
     int num_experts, int rank, int num_ranks, int num_warp_groups,
-    int num_warps_per_group, int phases, bool zero_copy) {
+    int num_warps_per_group, int phases, bool zero_copy,
+    uint64_t const* ring_addrs, int num_ring_addrs) {
   auto const sm_id = static_cast<int>(blockIdx.x);
   auto const num_sms = static_cast<int>(gridDim.x);
   auto const thread_id = static_cast<int>(threadIdx.x);
@@ -507,10 +518,11 @@ __global__ __launch_bounds__(1024, 1) void combine(
     auto const global_expert_idx = rank * num_local_experts + local_expert_idx;
     auto const layout =
         __ldg(layout_range + local_expert_idx * num_ranks + dst_rank);
-    auto const local_x =
-        static_cast<int4 const*>(x) + local_expert_idx * num_ranks *
-                                          num_max_dispatch_tokens_per_rank *
-                                          hidden_bf16_int4;
+    // auto const local_x =
+    //     static_cast<int4 const*>(x) + local_expert_idx * num_ranks *
+    //                                       num_max_dispatch_tokens_per_rank *
+    //                                       hidden_bf16_int4;  //
+    //                                       NOTE(MaoZiming): not used
     auto const local_src_info = src_info + local_expert_idx * num_ranks *
                                                num_max_dispatch_tokens_per_rank;
     auto const rdma_send_x_vec = static_cast<uint8_t*>(rdma_send_x) +
@@ -531,7 +543,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
     extern __shared__ __align__(1024) uint8_t smem_buffer[];
     auto smem_ptr =
         smem_buffer + warp_id * kNumStages * (kNumTMABufferBytes + 16);
-    uint32_t tma_phase[kNumStages] = {};
+    // uint32_t tma_phase[kNumStages] = {};  // NOTE(MaoZiming): not used
     auto tma_buffer = PatternVisitor([=](int const& i) {
       return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16));
     });
@@ -550,7 +562,8 @@ __global__ __launch_bounds__(1024, 1) void combine(
     }
     __syncwarp();
 
-    constexpr int kNumIters = hidden_bf16_int4_pad / (32 * kNumUnrolls);
+    // constexpr int kNumIters = hidden_bf16_int4_pad / (32 * kNumUnrolls);  //
+    // NOTE(MaoZiming): not used
     auto tma_load_and_arrive = [&](int const& stage_idx, int4 const* gmem_ptr,
                                    int const& num_bytes) {
       tma_load_1d(tma_buffer[stage_idx], gmem_ptr, tma_mbarrier[stage_idx],
@@ -567,7 +580,8 @@ __global__ __launch_bounds__(1024, 1) void combine(
     for (int token_idx = offset + sub_warp_id;
          token_idx < offset + num_tokens_to_send;
          token_idx += num_warps_per_group) {
-      auto const x_int4 = local_x + token_idx * hidden_bf16_int4;
+      // auto const x_int4 = local_x + token_idx * hidden_bf16_int4; //
+      // NOTE(MaoZiming): not used
       auto const rdma_send_type_row = reinterpret_cast<int*>(
           rdma_send_x_vec + token_idx * num_bytes_per_slot);
       auto const rdma_send_x_vec_row =
@@ -582,7 +596,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
           (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) *
               num_bytes_per_slot;
 
-      // NOTE(MaoZiming): we don't have nvshmem-style p2p mapping.
+      // NOTE(MaoZiming): we don't have nvshmem-style intra-node p2p mapping.
       // TODO(MaoZiming): understand the optimizations here.
 #ifdef false
       auto const dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
@@ -828,7 +842,8 @@ void combine(void* combined_x, void* rdma_recv_x, int* rdma_recv_flag,
              int hidden, int num_max_dispatch_tokens_per_rank, int num_topk,
              int num_experts, int rank, int num_ranks, bool use_logfmt,
              void* workspace, int num_device_sms, cudaStream_t stream,
-             int phases, bool zero_copy) {
+             int phases, bool zero_copy, uint64_t const* ring_addrs,
+             int num_ring_addrs) {
   constexpr int kNumMaxTopk = 9;
   int const num_warp_groups = ceil_div(num_experts, num_device_sms);
   int const num_warps_per_group = 32 / num_warp_groups;
@@ -859,12 +874,18 @@ void combine(void* combined_x, void* rdma_recv_x, int* rdma_recv_flag,
                   num_next_clean_int, atomic_clean_flag, num_combined_tokens,  \
                   hidden, num_topk, num_max_dispatch_tokens_per_rank,          \
                   num_experts, rank, num_ranks, num_warp_groups,               \
-                  num_warps_per_group, phases, zero_copy);                     \
+                  num_warps_per_group, phases, zero_copy, ring_addrs,          \
+                  num_ring_addrs);                                             \
   }                                                                            \
   break
 
   SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
   SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
+  auto err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    printf("[combine] kernel launch error: %s\n", cudaGetErrorString(err));
+    fflush(stdout);
+  }
 #undef COMBINE_LAUNCH_CASE
 }
 

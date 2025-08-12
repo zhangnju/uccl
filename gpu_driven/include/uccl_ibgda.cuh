@@ -113,8 +113,9 @@ struct nvshmemi_ibgda_device_state_t {
 // TODO(MaoZiming): Fix. This should be a non-fetch add operation. This could be
 // implemented with CPU proxy.
 __device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(
-    void* rptr, int const& value, int pe, int qp_id,
-    bool is_local_copy = false) {
+    void* rptr, int const& value, int pe, int qp_id, int sm_id,
+    bool is_local_copy = false, uint64_t const* ring_addrs = nullptr,
+    int num_ring_addrs = 0) {
   (void)rptr;
   (void)value;
   (void)is_local_copy;
@@ -130,6 +131,53 @@ __device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(
         "[ibgda_amo_nonfetch_add] Remote atomic operation not implemented yet. "
         "rptr: %p, value: %d, pe: %d, qp_id: %d\n",
         rptr, value, pe, qp_id);
+
+    int safe_n = num_ring_addrs > 0 ? num_ring_addrs : 1;
+    int ring_idx = (sm_id >= 0 ? sm_id : 0) % safe_n;
+
+    auto* rb = reinterpret_cast<DeviceToHostCmdBuffer*>(
+        static_cast<uintptr_t>(ring_addrs[ring_idx]));
+    uint64_t cur_head = rb->head;
+    uint64_t cur_tail = rb->volatile_tail();
+    uint64_t inflight = cur_head - cur_tail;
+    auto last_print = clock64();
+    while (true) {
+      // NOTE(MaoZiming): update the view.
+      cur_head = rb->head;
+      cur_tail = rb->volatile_tail();
+      inflight = cur_head - cur_tail;
+      if (inflight < kMaxInflight) {
+        uint64_t slot = cur_head;
+        TransferCmd cmd{};
+        // TODO(MaoZiming): Check fields here.
+        // NOTE(MaoZiming): cmd is needed for proxy to process the command.
+        cmd.cmd = 1;  // to avoid 0 as a valid command.
+        cmd.sm_id = sm_id;
+        cmd.value = value;
+        cmd.req_lptr = reinterpret_cast<uint64_t>(rptr);
+
+        // rb->set_buffer(slot, cmd);
+        // __threadfence_system();
+        // rb->commit_with_head(slot + 1);
+        rb->atomic_set_and_commit(cmd, &slot);
+        printf(
+            "Pushed cmd to ring buffer %p at slot %llu, cmd.cmd: %llu, cmd: "
+            "%llu\n",
+            rb, slot, cmd.cmd, rb->buf[slot & rb->mask()].cmd);
+        break;
+      } else {
+        auto now = clock64();
+        if (now - last_print > 10 * 1e9) {
+          uint64_t tail_cmd = rb->buf[cur_tail & rb->mask()].cmd;
+          printf(
+              "[nvshmemi_ibgda_amo_nonfetch_add] %p waiting sm_id: %d, "
+              "cur_head: "
+              "%llu, cur_tail: %llu, inflight: %llu, tail_cmd: %llu\n",
+              rb, sm_id, cur_head, cur_tail, inflight, tail_cmd);
+          last_print = now;
+        }
+      }
+    }
   }
 }
 

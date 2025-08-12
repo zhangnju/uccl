@@ -284,6 +284,7 @@ class Buffer {
     auto num_local_experts = num_experts / num_ranks;
 
     // Buffer control
+    // TODO(MaoZiming)
     LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank,
                             hidden, num_ranks, num_experts);
     EP_HOST_ASSERT(layout.total_bytes <=
@@ -438,6 +439,7 @@ class Buffer {
     auto num_combined_tokens = static_cast<int>(topk_weights.size(0));
 
     // Buffer control
+    // TODO(MaoZiming)
     LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank,
                             hidden, num_ranks, num_experts);
     EP_HOST_ASSERT(layout.total_bytes <=
@@ -590,6 +592,7 @@ class Buffer {
       internode::barrier();
       CUDA_CHECK(cudaDeviceSynchronize());
 #else
+      // TODO(MaoZiming): this needs to be allocated by proxy.
       rdma_buffer_ptr =
           internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
       CUDA_CHECK(

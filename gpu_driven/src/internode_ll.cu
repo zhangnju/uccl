@@ -148,12 +148,13 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
         slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
         auto const dst_rank = dst_expert_idx / num_local_experts;
         auto const dst_expert_local_idx = dst_expert_idx % num_local_experts;
-        if (lane_id == 0)
-          printf(
-              "dst_expert_idx: %d, num_local_experts: %d, sm_id: %d, num_sms: "
-              "%d, num_threads: %d, thread_id: %d, warp_id: %d\n",
-              dst_expert_idx, num_local_experts, sm_id, num_sms, num_threads,
-              thread_id, warp_id);
+        // if (lane_id == 0)
+        //   printf(
+        //       "dst_expert_idx: %d, num_local_experts: %d, sm_id: %d, num_sms:
+        //       "
+        //       "%d, num_threads: %d, thread_id: %d, warp_id: %d\n",
+        //       dst_expert_idx, num_local_experts, sm_id, num_sms, num_threads,
+        //       thread_id, warp_id);
         auto const src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
         auto const dst_ptr =
             reinterpret_cast<uint64_t>(rdma_recv_x) +

@@ -454,6 +454,7 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
     exit(1);
   }
   S.wr_id_to_wr_ids[largest_wr] = wrs_to_post;
+  printf("Posted %d WRs with largest_wr %lu\n", num_wrs, largest_wr);
 }
 
 void local_process_completions(ProxyCtx& S,
@@ -467,6 +468,8 @@ void local_process_completions(ProxyCtx& S,
   assert(S.ack_qp->recv_cq == S.cq);
   assert(S.recv_ack_qp->send_cq == S.cq);
   assert(S.recv_ack_qp->recv_cq == S.cq);
+
+  // printf("Local thread %d processing %d completions\n", thread_idx, ne);
   for (int i = 0; i < ne; ++i) {
     if (wc[i].status != IBV_WC_SUCCESS) {
       fprintf(stderr, "CQE error wr_id=%llu status=%s\n",
@@ -490,6 +493,8 @@ void local_process_completions(ProxyCtx& S,
           if (!S.has_received_ack || wr_done >= S.largest_completed_wr) {
             S.largest_completed_wr = wr_done;
             S.has_received_ack = true;
+            printf("Local thread %d received ACK for WR %lu\n", thread_idx,
+                   wr_done);
           } else {
             fprintf(stderr,
                     "Warning: received ACK for WR %lu, but largest completed "
@@ -546,6 +551,8 @@ void remote_process_completions(ProxyCtx& S, int idx, CopyRingBuffer& g_ring,
                                 int ne, ibv_wc* wc) {
   struct ibv_recv_wr wrs[kMaxOutstandingRecvs];
   if (ne == 0) return;
+
+  // printf("Remote thread %d processing %d completions\n", idx, ne);
   int num_wr_imm = 0;
   for (int i = 0; i < ne; ++i) {
     if (wc[i].status != IBV_WC_SUCCESS) {
@@ -605,6 +612,8 @@ void remote_process_completions(ProxyCtx& S, int idx, CopyRingBuffer& g_ring,
   if (!task_vec.empty()) {
     while (!g_ring.pushN(task_vec.data(), task_vec.size())) { /* Busy spin. */
     }
+    // printf("Remote thread %d pushed %zu tasks to ring buffer\n", idx,
+    //        task_vec.size());
   }
 }
 
@@ -674,6 +683,7 @@ void remote_send_ack(struct ibv_qp* ack_qp, uint64_t& wr_id,
     }
     std::abort();
   }
+  // printf("Remote thread %d posted ACK for WR %lu\n", worker_idx, wr_id);
 }
 
 void local_post_ack_buf(ProxyCtx& S, int depth) {

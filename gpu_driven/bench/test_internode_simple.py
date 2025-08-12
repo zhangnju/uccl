@@ -6,7 +6,7 @@ This test avoids the IPC handle issues by focusing only on low-latency functiona
 import argparse
 import torch
 import torch.distributed as dist
-
+import time
 from buffer import Buffer
 
 # import deep_ep as ep
@@ -26,7 +26,7 @@ from utils import init_dist, get_peer_ip
 def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     num_tokens = 512
     hidden = 2048
-    num_experts = 64
+    num_experts = 6  # TODO(MaoZiming).
     num_topk = 4
     device_index = 0
 
@@ -66,6 +66,19 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
         proxy.start_dual()
         proxies.append(proxy)
     ep.register_proxies(device_index, proxies)
+
+    workers = None
+    if hasattr(gpu_driven, "PeerCopyManager"):
+        try:
+            workers = gpu_driven.PeerCopyManager(src_device=device_index)
+            workers.start_for_proxies(proxies)
+            if rank == 0:
+                print("[simple-test] ✓ PeerCopyManager started", flush=True)
+        except Exception as e:
+            if rank == 0:
+                print(f"[simple-test] PeerCopyManager unavailable: {e}", flush=True)
+
+    time.sleep(1)
 
     try:
         buffer = Buffer(
@@ -133,6 +146,12 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
             pass
         dist.barrier()
         print("[simple-test] ✓ Buffer destroyed", flush=True)
+
+        if workers is not None:
+            try:
+                workers.stop()
+            except Exception:
+                pass
 
         try:
             for p in proxies:

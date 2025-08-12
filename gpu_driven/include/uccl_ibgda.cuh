@@ -122,9 +122,15 @@ __device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(
       "[ibgda_amo_nonfetch_add] rptr: %p, value: %d, pe: %d, qp_id: %d, "
       "is_local_copy: %d\n",
       rptr, value, pe, qp_id, is_local_copy);
-  // TODO(MaoZiming): Implement it with a remote atomic operation.
-  atomicAdd(reinterpret_cast<int*>(rptr), value);
-  __threadfence_system();
+  if (is_local_copy) {
+    atomicAdd(reinterpret_cast<int*>(rptr), value);
+  } else {
+    // TODO(MaoZiming): Implement it with a remote atomic operation.
+    printf(
+        "[ibgda_amo_nonfetch_add] Remote atomic operation not implemented yet. "
+        "rptr: %p, value: %d, pe: %d, qp_id: %d\n",
+        rptr, value, pe, qp_id);
+  }
 }
 
 #ifdef false

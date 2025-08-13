@@ -454,7 +454,7 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
     exit(1);
   }
   S.wr_id_to_wr_ids[largest_wr] = wrs_to_post;
-  printf("Posted %d WRs with largest_wr %lu\n", num_wrs, largest_wr);
+  printf("Posted %ld WRs with largest_wr %lu\n", num_wrs, largest_wr);
 }
 
 void local_process_completions(ProxyCtx& S,

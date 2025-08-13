@@ -154,16 +154,16 @@ __device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(
         cmd.cmd = 1;  // to avoid 0 as a valid command.
         cmd.sm_id = sm_id;
         cmd.value = value;
-        cmd.req_lptr = reinterpret_cast<uint64_t>(rptr);
+        cmd.req_rptr = reinterpret_cast<uint64_t>(rptr);
 
         // rb->set_buffer(slot, cmd);
         // __threadfence_system();
         // rb->commit_with_head(slot + 1);
         rb->atomic_set_and_commit(cmd, &slot);
         printf(
-            "Pushed cmd to ring buffer %p at slot %llu, cmd.cmd: %llu, cmd: "
-            "%llu\n",
-            rb, slot, cmd.cmd, rb->buf[slot & rb->mask()].cmd);
+            "Pushed amo cmd to ring buffer %p at slot %llu, sm_id: %d, cmd.cmd: %llu, cmd: "
+            "%llu, cur_head: %llu, cur_tail: %llu, inflight: %llu\n",
+            rb, slot, cmd.sm_id, cmd.cmd, rb->buf[slot & rb->mask()].cmd, rb->head, rb->volatile_tail(), rb->head - rb->volatile_tail());
         break;
       } else {
         auto now = clock64();

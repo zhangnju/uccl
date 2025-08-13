@@ -88,13 +88,24 @@ void Proxy::run_dual() {
 
   uint64_t my_tail = 0;
   size_t seen = 0;
+  auto last_print = std::chrono::steady_clock::now();
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
     poll_cq_dual(ctx_, finished_wrs_, finished_wrs_mutex_, cfg_.block_idx,
                  ring);
-    // if (my_tail < kIterations) {
     notify_gpu_completion(my_tail);
     post_gpu_command(my_tail, seen);
-    // }
+
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_print >= std::chrono::seconds(10)) {
+        uint64_t head = cfg_.rb->head;
+        uint64_t tail = cfg_.rb->volatile_tail();
+        printf("[block %d] head=%llu tail=%llu inflight=%llu\n",
+               cfg_.block_idx,
+               static_cast<unsigned long long>(head),
+               static_cast<unsigned long long>(tail),
+               static_cast<unsigned long long>(head - tail));
+        last_print = now;
+    }
   }
 }
 
@@ -316,8 +327,11 @@ void Proxy::run_local() {
         }
     */
     std::atomic_thread_fence(std::memory_order_acquire);
-
-    TransferCmd& cmd_entry = cfg_.rb->buf[idx];
+    if (cmd == 1) {
+      TransferCmd& cmd_entry = cfg_.rb->buf[idx];
+      printf("Received command 1: block %d, seen=%d, value: %d\n", cfg_.block_idx + 1, seen, cmd_entry.value);
+    }
+    // TransferCmd& cmd_entry = cfg_.rb->buf[idx];
     // printf(
     //     "[blk %d] cmd=%llu dst=%u/%u bytes=%llu src=%p rptr=0x%llx
     //     lptr=0x%llx " "sm=%d lane=%d msg=%d\n", cfg_.block_idx, (unsigned

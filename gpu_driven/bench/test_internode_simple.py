@@ -52,14 +52,20 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     num_device_sms = torch.cuda.get_device_properties(0).multi_processor_count
 
     bench = gpu_driven.Bench()
-    x_ptr = x.data_ptr()
+    # x_ptr = x.data_ptr()
     proxies = []
+    
+    nbytes = int(1e9)  # 256 MB
+    scratch = torch.empty(nbytes, dtype=torch.uint8, device="cuda")
+    scratch_ptr   = scratch.data_ptr()
+    scratch_bytes = scratch.numel() * scratch.element_size()
+
     for i in range(bench.blocks()):
         proxy = gpu_driven.Proxy(
             rb_addr=bench.ring_addr(i),
             block_idx=i,
-            gpu_buffer_addr=x_ptr,
-            total_size=x_bytes,
+            gpu_buffer_addr=scratch_ptr,
+            total_size=scratch_bytes,
             rank=rank,
             peer_ip=peer_ip,
         )
@@ -83,6 +89,7 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     try:
         buffer = Buffer(
             group=group,
+            rdma_buffer_ptr=scratch_ptr,
             num_nvl_bytes=0,
             num_rdma_bytes=int(
                 1e9

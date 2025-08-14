@@ -54,10 +54,10 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     bench = gpu_driven.Bench()
     # x_ptr = x.data_ptr()
     proxies = []
-    
+
     nbytes = int(1e9)  # 256 MB
     scratch = torch.empty(nbytes, dtype=torch.uint8, device="cuda")
-    scratch_ptr   = scratch.data_ptr()
+    scratch_ptr = scratch.data_ptr()
     scratch_bytes = scratch.numel() * scratch.element_size()
 
     for i in range(bench.blocks()):
@@ -146,6 +146,8 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
                 f"[simple-test] Combined tensor shape: {combined_x.shape}", flush=True
             )
             print("[simple-test] ✓ All tests passed!", flush=True)
+
+        time.sleep(10)
 
         try:
             buffer.destroy()

@@ -27,9 +27,7 @@ __device__ __forceinline__ void nvshmemi_ibgda_put_nbi_warp(
     int num_ring_addrs) {
   // NOTE(MaoZiming): different from the nvshmemi_ibgda_put_nbi_warp in
   // ibgda_device.cuh, we don't do warp-cooperation.
-  if (lane_id != 0)
-    return;  // TODO(MaoZiming): Currently ring buffer is single writer. This
-             // might not be good for the DeepEP optimization.
+  if (lane_id != 0) return;
   int safe_n = num_ring_addrs > 0 ? num_ring_addrs : 1;
   int ring_idx = (sm_id >= 0 ? sm_id : 0) % safe_n;
 
@@ -161,9 +159,11 @@ __device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(
         // rb->commit_with_head(slot + 1);
         rb->atomic_set_and_commit(cmd, &slot);
         printf(
-            "Pushed amo cmd to ring buffer %p at slot %llu, sm_id: %d, cmd.cmd: %llu, cmd: "
+            "Pushed amo cmd to ring buffer %p at slot %llu, sm_id: %d, "
+            "cmd.cmd: %llu, cmd: "
             "%llu, cur_head: %llu, cur_tail: %llu, inflight: %llu\n",
-            rb, slot, cmd.sm_id, cmd.cmd, rb->buf[slot & rb->mask()].cmd, rb->head, rb->volatile_tail(), rb->head - rb->volatile_tail());
+            rb, slot, cmd.sm_id, cmd.cmd, rb->buf[slot & rb->mask()].cmd,
+            rb->head, rb->volatile_tail(), rb->head - rb->volatile_tail());
         break;
       } else {
         auto now = clock64();

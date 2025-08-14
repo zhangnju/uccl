@@ -42,6 +42,8 @@ void Proxy::init_common() {
   modify_qp_to_rts(ctx_, &local_info_);
 
   ctx_.remote_addr = remote_info_.addr;
+  printf("Remote address: %p, RKey: %u\n", (void*)ctx_.remote_addr,
+         remote_info_.rkey);
   ctx_.remote_rkey = remote_info_.rkey;
 }
 
@@ -97,14 +99,13 @@ void Proxy::run_dual() {
 
     auto now = std::chrono::steady_clock::now();
     if (now - last_print >= std::chrono::seconds(10)) {
-        uint64_t head = cfg_.rb->head;
-        uint64_t tail = cfg_.rb->volatile_tail();
-        printf("[block %d] head=%llu tail=%llu inflight=%llu\n",
-               cfg_.block_idx,
-               static_cast<unsigned long long>(head),
-               static_cast<unsigned long long>(tail),
-               static_cast<unsigned long long>(head - tail));
-        last_print = now;
+      uint64_t head = cfg_.rb->head;
+      uint64_t tail = cfg_.rb->volatile_tail();
+      printf("[block %d] head=%llu tail=%llu inflight=%llu\n", cfg_.block_idx,
+             static_cast<unsigned long long>(head),
+             static_cast<unsigned long long>(tail),
+             static_cast<unsigned long long>(head - tail));
+      last_print = now;
     }
   }
 }
@@ -178,6 +179,8 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
 
   std::vector<uint64_t> wrs_to_post;
   wrs_to_post.reserve(batch_size);
+  std::vector<TransferCmd> cmds_to_post;
+  cmds_to_post.reserve(batch_size);
 
   for (size_t i = seen; i < cur_head; ++i) {
     /*
@@ -214,14 +217,13 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
     } while (cmd == 0);
 
     TransferCmd& cmd_entry = cfg_.rb->buf[i];
-    printf(
-        "[blk %d] cmd=%llu dst=%u/%u bytes=%llu src=%p rptr=0x%llx lptr=0x%llx "
-        "sm=%d lane=%d msg=%d\n",
-        cfg_.block_idx, (unsigned long long)cmd_entry.cmd, cmd_entry.dst_rank,
-        cmd_entry.dst_gpu, (unsigned long long)cmd_entry.bytes,
-        cmd_entry.src_ptr, (unsigned long long)cmd_entry.req_rptr,
-        (unsigned long long)cmd_entry.req_lptr, cmd_entry.sm_id,
-        cmd_entry.lane_id, cmd_entry.message_idx);
+    // printf(
+    //     "[blk %d] cmd=%llu dst=%u/%u bytes=%llu src=%p rptr=0x%llx
+    //     lptr=0x%llx " "sm=%d lane=%d msg=%d\n", cfg_.block_idx, (unsigned
+    //     long long)cmd_entry.cmd, cmd_entry.dst_rank, cmd_entry.dst_gpu,
+    //     (unsigned long long)cmd_entry.bytes, cmd_entry.src_ptr, (unsigned
+    //     long long)cmd_entry.req_rptr, (unsigned long long)cmd_entry.req_lptr,
+    //     cmd_entry.sm_id, cmd_entry.lane_id, cmd_entry.message_idx);
 
     /*
     uint64_t expected_cmd =
@@ -234,6 +236,7 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
     }
     */
     wrs_to_post.push_back(i);
+    cmds_to_post.push_back(cmd_entry);
     wr_id_to_start_time_[i] = std::chrono::high_resolution_clock::now();
   }
   seen = cur_head;
@@ -246,8 +249,12 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
 
   if (!wrs_to_post.empty()) {
     auto start = std::chrono::high_resolution_clock::now();
+    // post_rdma_async_batched(ctx_, cfg_.gpu_buffer, kObjectSize, batch_size,
+    //                         wrs_to_post, finished_wrs_, finished_wrs_mutex_,
+    //                         cmds_to_post);
     post_rdma_async_batched(ctx_, cfg_.gpu_buffer, kObjectSize, batch_size,
-                            wrs_to_post, finished_wrs_, finished_wrs_mutex_);
+                            wrs_to_post, finished_wrs_, finished_wrs_mutex_,
+                            cmds_to_post);
     auto end = std::chrono::high_resolution_clock::now();
     total_rdma_write_durations_ +=
         std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -329,7 +336,8 @@ void Proxy::run_local() {
     std::atomic_thread_fence(std::memory_order_acquire);
     if (cmd == 1) {
       TransferCmd& cmd_entry = cfg_.rb->buf[idx];
-      printf("Received command 1: block %d, seen=%d, value: %d\n", cfg_.block_idx + 1, seen, cmd_entry.value);
+      printf("Received command 1: block %d, seen=%d, value: %d\n",
+             cfg_.block_idx + 1, seen, cmd_entry.value);
     }
     // TransferCmd& cmd_entry = cfg_.rb->buf[idx];
     // printf(

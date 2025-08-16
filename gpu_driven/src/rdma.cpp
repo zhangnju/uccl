@@ -456,11 +456,17 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
     wrs[i].sg_list = &sges[i];
     wrs[i].num_sge = 1;
     wrs[i].wr_id = wrs_to_post[i];
+    // TODO(Ziming): review the logic of following comment here
+    // ORIGINAL CODE: Incorrect address calculation ignoring cmd.req_rptr
     // wrs[i].wr.rdma.remote_addr = cmd.req_rptr ? cmd.req_rptr : S.remote_addr;
-    // TODO(MaoZiming): fix address translation.
-    // NOTE(MaoZiming): cmd.req_rptr is not correct. Because uccl_ep has not yet
-    // done rdma handshake, so it doesn't know the remote address.
-    wrs[i].wr.rdma.remote_addr = S.remote_addr + i * bytes;
+    // wrs[i].wr.rdma.remote_addr = S.remote_addr + i * bytes;
+    
+    // NEW APPROACH: Use offset from GPU kernel + remote base address
+    // GPU kernel now passes offset within LowLatencyLayout buffer via cmd.req_rptr
+    // CPU proxy translates: remote_base_addr + offset = final_remote_addr
+    // TODO(yihan): Mark here for future debugging check.
+    wrs[i].wr.rdma.remote_addr = S.remote_addr + cmd.req_rptr;
+    
     wrs[i].wr.rdma.rkey = S.remote_rkey;
     wrs[i].opcode = IBV_WR_RDMA_WRITE;
     wrs[i].send_flags = 0;

@@ -191,12 +191,12 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
 
   for (size_t i = seen; i < cur_head; ++i) {
     
-    uint64_t cmd = cfg_.rb->buf[i & kQueueMask].cmd;
-    if (cmd == 0) {
-      fprintf(stderr, "Error: cmd at index %zu is zero, my_tail: %lu\n", i,
-              my_tail);
-      std::abort();
-    }
+    // uint64_t cmd = cfg_.rb->buf[i & kQueueMask].cmd;
+    // if (cmd == 0) {
+    //   fprintf(stderr, "Error: cmd at index %zu is zero, my_tail: %lu\n", i,
+    //           my_tail);
+    //   std::abort();
+    // }
     
 
     uint64_t cmd;

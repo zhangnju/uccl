@@ -553,7 +553,7 @@ void local_process_completions(ProxyCtx& S,
   for (int i = 0; i < ne; ++i) {
     if (wc[i].status != IBV_WC_SUCCESS) {
       fprintf(stderr,
-              "here!： CQE ERROR wr_id=%llu status=%d(%s) opcode=%d byte_len=%u "
+              "CQE ERROR wr_id=%llu status=%d(%s) opcode=%d byte_len=%u "
               "vendor_err=0x%x qp_num=0x%x\n",
               (unsigned long long)wc[i].wr_id, wc[i].status,
               ibv_wc_status_str(wc[i].status), wc[i].opcode, wc[i].byte_len,

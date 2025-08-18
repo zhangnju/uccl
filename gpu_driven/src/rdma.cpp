@@ -219,6 +219,8 @@ void create_per_thread_qp(ProxyCtx& S, void* gpu_buffer, size_t size,
   local_info->addr = reinterpret_cast<uintptr_t>(gpu_buffer);
   local_info->psn = rand() & 0xffffff;      // random psn
   local_info->ack_psn = rand() & 0xffffff;  // random ack psn
+  // printf("[DEBUG] Rank %d: Registering local buffer addr=0x%lx, size=%zu bytes\n", 
+  //        rank, local_info->addr, size);
   fill_local_gid(S, local_info);
   printf(
       "Local RDMA info: addr=0x%lx, rkey=0x%x, qp_num=%u, psn=%u, "
@@ -461,10 +463,6 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
     // wrs[i].wr.rdma.remote_addr = cmd.req_rptr ? cmd.req_rptr : S.remote_addr;
     // wrs[i].wr.rdma.remote_addr = S.remote_addr + i * bytes;
     
-    // NEW APPROACH: Use offset from GPU kernel + remote base address
-    // GPU kernel now passes offset within LowLatencyLayout buffer via cmd.req_rptr
-    // CPU proxy translates: remote_base_addr + offset = final_remote_addr
-    // TODO(yihan): Mark here for future debugging check.
     wrs[i].wr.rdma.remote_addr = S.remote_addr + cmd.req_rptr;
     
     wrs[i].wr.rdma.rkey = S.remote_rkey;
@@ -472,15 +470,6 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
     wrs[i].send_flags = 0;
     wrs[i].next = (i + 1 < num_wrs) ? &wrs[i + 1] : nullptr;
 
-    printf(
-        "[WR %zu/%zu] wr_id=%lu opcode=%s sge.addr=0x%lx len=%u lkey=0x%x "
-        "remote_addr=0x%lx S.remote_addr=0x%lx rkey=0x%x cmd.cmd=%lu "
-        "bytes=%lu\n",
-        i, num_wrs, wrs[i].wr_id,
-        (wrs[i].opcode == IBV_WR_RDMA_WRITE) ? "WRITE" : "WRITE_WITH_IMM",
-        (unsigned long)sges[i].addr, sges[i].length, sges[i].lkey,
-        (unsigned long)wrs[i].wr.rdma.remote_addr, S.remote_addr,
-        wrs[i].wr.rdma.rkey, cmd.cmd, cmd.bytes);
   }
   const size_t last = num_wrs - 1;
   const uint64_t largest_wr = wrs_to_post[last];
@@ -488,8 +477,8 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
   wrs[last].opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
   wrs[last].imm_data = htonl(static_cast<uint32_t>(largest_wr));
 
-  printf("[WR %zu/%zu] (last) wr_id=%lu opcode=WRITE_WITH_IMM imm_data=%u\n",
-         last, num_wrs, wrs[last].wr_id, ntohl(wrs[last].imm_data));
+  // printf("[WR %zu/%zu] (last) wr_id=%lu opcode=WRITE_WITH_IMM imm_data=%u\n",
+  //        last, num_wrs, wrs[last].wr_id, ntohl(wrs[last].imm_data));
 
   ibv_send_wr* bad = nullptr;
   int ret = ibv_post_send(S.qp, &wrs[0], &bad);
@@ -506,8 +495,8 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
     std::abort();
   }
   S.wr_id_to_wr_ids[largest_wr] = wrs_to_post;
-  printf("Posted %zu WRs (chain) last_wr=%lu remote_rkey=0x%x\n", num_wrs,
-         largest_wr, S.remote_rkey);
+  // printf("Posted %zu WRs (chain) last_wr=%lu remote_rkey=0x%x\n", num_wrs,
+  //        largest_wr, S.remote_rkey);
 }
 
 void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
@@ -545,7 +534,7 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
     exit(1);
   }
   S.wr_id_to_wr_ids[largest_wr] = wrs_to_post;
-  printf("Posted %ld WRs with largest_wr %lu\n", num_wrs, largest_wr);
+  //printf("Posted %ld WRs with largest_wr %lu\n", num_wrs, largest_wr);
 }
 
 void local_process_completions(ProxyCtx& S,
@@ -564,7 +553,7 @@ void local_process_completions(ProxyCtx& S,
   for (int i = 0; i < ne; ++i) {
     if (wc[i].status != IBV_WC_SUCCESS) {
       fprintf(stderr,
-              "CQE ERROR wr_id=%llu status=%d(%s) opcode=%d byte_len=%u "
+              "here!： CQE ERROR wr_id=%llu status=%d(%s) opcode=%d byte_len=%u "
               "vendor_err=0x%x qp_num=0x%x\n",
               (unsigned long long)wc[i].wr_id, wc[i].status,
               ibv_wc_status_str(wc[i].status), wc[i].opcode, wc[i].byte_len,
@@ -588,8 +577,8 @@ void local_process_completions(ProxyCtx& S,
           if (!S.has_received_ack || wr_done >= S.largest_completed_wr) {
             S.largest_completed_wr = wr_done;
             S.has_received_ack = true;
-            printf("Local thread %d received ACK for WR %lu\n", thread_idx,
-                   wr_done);
+            // printf("Local thread %d received ACK for WR %lu\n", thread_idx,
+            //        wr_done);
           } else {
             fprintf(stderr,
                     "Warning: received ACK for WR %lu, but largest completed "

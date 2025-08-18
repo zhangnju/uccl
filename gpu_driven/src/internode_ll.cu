@@ -165,14 +165,26 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
         //     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
         //     slot_idx * num_bytes_per_msg;
         
-        // NEW APPROACH: Calculate offset within LowLatencyLayout buffer for CPU proxy translation, we only need offset here
-        // CPU proxy will add this offset to remote base address (S.remote_addr + offset)
-        // TODO(yihan): Mark here for future debugging check.
+        // NEW APPROACH: Calculate offset within entire LowLatencyLayout buffer for CPU proxy translation
+        // The CPU proxy's S.remote_addr points to the base of the remote rdma_buffer,
+        // so we need to calculate the offset from rdma_buffer base to the target location in rdma_recv_x
+        // 
+        // From LowLatencyLayout: rdma_recv_x = rdma_buffer + signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i
+        // For the current buffer (i=0), we need to add this base offset plus the message offset
+        auto const rdma_recv_x_offset_in_buffer = reinterpret_cast<uint64_t>(rdma_recv_x) - 
+                                                  reinterpret_cast<uint64_t>(rdma_recv_x) + 
+                                                  (dst_expert_local_idx * num_ranks *
+                                                       num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
+                                                   rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
+                                                   slot_idx * num_bytes_per_msg);
+        // Actually, let's use the original approach but document that S.remote_addr should point to rdma_recv_x base
         auto const dst_offset =
             dst_expert_local_idx * num_ranks *
                 num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
             rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
             slot_idx * num_bytes_per_msg;
+        
+        
 #ifdef false
         auto const dst_p2p_ptr =
             uccl::nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
@@ -440,6 +452,7 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               bool use_fp8, bool round_scale, bool use_ue8m0, void* workspace,
               int num_device_sms, cudaStream_t stream, int phases,
               uint64_t const* ring_addrs, int num_ring_addrs) {
+
   constexpr int kNumMaxTopK = 9;
   int const num_warp_groups = ceil_div(num_experts, num_device_sms);
   int const num_warps_per_group = 32 / num_warp_groups;

@@ -52,7 +52,7 @@ static inline std::string get_oob_ip() {
 
 class Endpoint {
   const uint64_t kRTTBytes = 1024 * 1024;
-  const uint64_t kChunkSize = 512 * 1024;
+  const uint64_t kChunkSize = 1024 * 1024;
   const uint32_t kMaxInflightChunks = 8;
 
  public:
@@ -181,6 +181,14 @@ class Endpoint {
 
   bool advertise(uint64_t conn_id, uint64_t mr_id, void* addr, size_t len,
                  char* out_buf);
+
+  /* Write data to the remote server. Blocking. */
+  bool write(uint64_t conn_id, uint64_t mr_id, void* dst, size_t size,
+             uccl::FifoItem const& slot_item, bool inside_python = true);
+
+  /* Write data to the remote server asynchronously. */
+  bool write_async(uint64_t conn_id, uint64_t mr_id, void* dst, size_t size,
+                   uccl::FifoItem const& slot_item, uint64_t* transfer_id);
 
   /* Poll the status of the asynchronous receive. */
   bool poll_async(uint64_t transfer_id, bool* is_done);
@@ -348,6 +356,7 @@ class Endpoint {
     SEND,
     RECV,
     READ,
+    WRITE,
     SEND_IPC,
     RECV_IPC,
   };
@@ -363,7 +372,7 @@ class Endpoint {
     Task* self_ptr;
   };
 
-  struct alignas(64) ReadTask {
+  struct alignas(64) RWTask {
     TaskType type;
     void* data;
     size_t size;
@@ -371,13 +380,14 @@ class Endpoint {
     uint64_t mr_id;
     std::atomic<bool> done;
     // For proxy to access the task.done
-    ReadTask* self_ptr;
+    RWTask* self_ptr;
     uccl::FifoItem slot_item;
   };
 
   jring_t* send_task_ring_;
   jring_t* recv_task_ring_;
   jring_t* read_task_ring_;
+  jring_t* write_task_ring_;
 
   std::atomic<bool> stop_{false};
   std::thread send_proxy_thread_;

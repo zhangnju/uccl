@@ -36,9 +36,10 @@ from utils import init_dist, get_peer_ip
 def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     num_tokens = 512
     hidden = 2048
-    num_experts = 6  # TODO(MaoZiming).
+    num_experts = 3 * num_ranks
     num_topk = 4
-    device_index = 0
+    device_index = rank
+    print(f"[simple-test] Running on device {device_index}", flush=True)
 
     peer_ip = get_peer_ip(rank, num_ranks, group)
 
@@ -59,14 +60,16 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     topk_idx = torch.randint(
         0, num_experts, (num_tokens, num_topk), device=f"cuda:{device_index}"
     )
-    num_device_sms = torch.cuda.get_device_properties(0).multi_processor_count
+    num_device_sms = torch.cuda.get_device_properties(
+        device_index
+    ).multi_processor_count
 
     bench = gpu_driven.Bench()
     # x_ptr = x.data_ptr()
     proxies = []
 
     nbytes = int(1e9)  # 256 MB
-    scratch = torch.empty(nbytes, dtype=torch.uint8, device="cuda")
+    scratch = torch.empty(nbytes, dtype=torch.uint8, device=f"cuda:{device_index}")
     scratch_ptr = scratch.data_ptr()
     scratch_bytes = scratch.numel() * scratch.element_size()
 
@@ -209,20 +212,7 @@ def test_worker(local_rank: int, num_local_ranks: int):
 
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(description="Simple DeepEP internode test")
-    # parser.add_argument(
-    #     "--num-processes",
-    #     type=int,
-    #     default=1,
-    #     help="Number of processes per node (default: 1)",
-    # )
-    # args = parser.parse_args()
-
     print("Simple internode test starting...")
     local_rank = int(os.environ["LOCAL_RANK"])
     num_local_ranks = int(os.environ["LOCAL_WORLD_SIZE"])
     test_worker(local_rank, num_local_ranks)
-
-    # torch.multiprocessing.spawn(
-    #     test_worker, args=(args.num_processes, args), nprocs=args.num_processes
-    # )

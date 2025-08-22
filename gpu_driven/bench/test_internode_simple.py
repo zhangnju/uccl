@@ -222,7 +222,7 @@ if __name__ == "__main__":
     local_rank = int(os.environ["LOCAL_RANK"])
     num_local_ranks = int(os.environ["LOCAL_WORLD_SIZE"])
     test_worker(local_rank, num_local_ranks)
-    
+
     # torch.multiprocessing.spawn(
     #     test_worker, args=(args.num_processes, args), nprocs=args.num_processes
     # )

@@ -92,6 +92,7 @@ PYBIND11_MODULE(gpu_driven, m) {
       .def(py::init<>())
       .def("env_info", &Bench::env_info)
       .def("blocks", &Bench::blocks)
+      .def("num_proxies", &Bench::num_proxies)
       .def("ring_addr", &Bench::ring_addr)
       .def("timing_start", &Bench::timing_start)
       .def("timing_stop", &Bench::timing_stop)

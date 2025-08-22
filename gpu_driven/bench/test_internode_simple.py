@@ -15,6 +15,7 @@ torchrun --nnodes=2 --nproc_per_node=1 --node_rank=1 \
 # import argparse
 import torch
 import torch.distributed as dist
+from utils import get_cpu_proxies_meta
 import time
 from buffer import Buffer
 import os
@@ -38,7 +39,7 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     hidden = 2048
     num_experts = 3 * num_ranks
     num_topk = 4
-    device_index = rank
+    device_index = int(os.environ["LOCAL_RANK"])
     print(f"[simple-test] Running on device {device_index}", flush=True)
 
     peer_ip = get_peer_ip(rank, num_ranks, group)
@@ -56,7 +57,6 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     x = torch.randn(
         (num_tokens, hidden), dtype=torch.bfloat16, device=f"cuda:{device_index}"
     )
-    x_bytes = x.numel() * x.element_size()
     topk_idx = torch.randint(
         0, num_experts, (num_tokens, num_topk), device=f"cuda:{device_index}"
     )
@@ -68,12 +68,16 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     # x_ptr = x.data_ptr()
     proxies = []
 
-    nbytes = int(1e9)  # 256 MB
-    scratch = torch.empty(nbytes, dtype=torch.uint8, device=f"cuda:{device_index}")
+    scratch_nbytes = int(1e9)  # 256 MB
+    scratch = torch.empty(
+        scratch_nbytes, dtype=torch.uint8, device=f"cuda:{device_index}"
+    )
     scratch_ptr = scratch.data_ptr()
     scratch_bytes = scratch.numel() * scratch.element_size()
 
-    for i in range(bench.blocks()):
+    rank2meta = get_cpu_proxies_meta(rank, scratch_ptr, scratch_bytes, num_ranks)
+
+    for i in range(bench.num_proxies()):
         proxy = gpu_driven.Proxy(
             rb_addr=bench.ring_addr(i),
             block_idx=i,
@@ -104,9 +108,7 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
             group=group,
             rdma_buffer_ptr=scratch_ptr,
             num_nvl_bytes=0,
-            num_rdma_bytes=int(
-                1e9
-            ),  # TODO(MaoZiming): How does num_rdma_bytes relate to the size of x?
+            num_rdma_bytes=int(scratch_nbytes),
             low_latency_mode=True,
             num_qps_per_rank=num_device_sms,
             allow_nvlink_for_low_latency_mode=True,

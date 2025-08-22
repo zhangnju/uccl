@@ -25,6 +25,91 @@ void Proxy::pin_thread() {
   }
 }
 
+void Proxy::set_peers_meta(std::vector<PeerMeta> const& peers) {
+  peers_.clear();
+  peers_.reserve(peers.size());
+
+  for (auto const& p : peers) {
+    peers_.push_back(p);
+  }
+
+  ctxs_for_all_ranks_.clear();
+  ctxs_for_all_ranks_.reserve(peers.size());
+  for (size_t i = 0; i < peers.size(); ++i) {
+    ctxs_for_all_ranks_[i] = std::make_unique<ProxyCtx>();
+  }
+}
+
+static inline int pair_tid(int a, int b, int N) {
+  int lo = std::min(a, b), hi = std::max(a, b);
+  return lo * N + hi;  // unique per unordered pair
+}
+
+void Proxy::init_common_peers() {
+  int const my_rank = cfg_.rank;
+
+  per_thread_rdma_init(ctx_, cfg_.gpu_buffer, cfg_.total_size, my_rank,
+                       cfg_.block_idx);
+  pin_thread();
+  if (!ctx_.cq) ctx_.cq = create_per_thread_cq(ctx_);
+
+  int num_ranks = ctxs_for_all_ranks_.size();
+  local_infos_.assign(num_ranks, RDMAConnectionInfo{});
+  remote_infos_.assign(num_ranks, RDMAConnectionInfo{});
+
+  // Per peer QP initialization
+  for (int peer = 0; peer < num_ranks; ++peer) {
+    if (peer == my_rank) continue;
+    auto& c = *ctxs_for_all_ranks_[peer];
+    c.context = ctx_.context;
+    c.pd = ctx_.pd;
+    c.mr = ctx_.mr;
+    c.cq = ctx_.cq;
+
+    create_per_thread_qp(c, cfg_.gpu_buffer, cfg_.total_size,
+                         &local_infos_[peer], my_rank);
+    modify_qp_to_init(c);
+  }
+
+  usleep(50 * 1000);
+
+  // Out-of-band exchange per pair.
+  for (int peer = 0; peer < num_ranks; ++peer) {
+    if (peer == my_rank) continue;
+
+    bool const i_listen = (my_rank < peer);
+    int const tid = pair_tid(my_rank, peer, num_ranks);
+    char const* ip = peers_[peer].ip.c_str();
+
+    int virt_rank = i_listen ? 0 : 1;
+    exchange_connection_info(virt_rank, ip, tid, &local_infos_[peer],
+                             &remote_infos_[peer]);
+  }
+
+  // Bring each per-peer QP to RTR/RTS
+  for (int peer = 0; peer < num_ranks; ++peer) {
+    if (peer == my_rank) continue;
+    auto& c = *ctxs_for_all_ranks_[peer];
+
+    modify_qp_to_rtr(c, &remote_infos_[peer]);
+    modify_qp_to_rts(c, &local_infos_[peer]);
+
+    c.remote_addr = remote_infos_[peer].addr;
+    c.remote_rkey = remote_infos_[peer].rkey;
+
+    printf("Peer %d remote addr=%p rkey=%u\n", peer, (void*)c.remote_addr,
+           c.remote_rkey);
+
+    if (FILE* f = fopen("/tmp/uccl_debug.txt", "a")) {
+      fprintf(
+          f,
+          "[PROXY_INIT] me=%d peer=%d: remote_addr=0x%lx local_buffer=0x%lx\n",
+          my_rank, peer, c.remote_addr, (uintptr_t)cfg_.gpu_buffer);
+      fclose(f);
+    }
+  }
+}
+
 void Proxy::init_common() {
   per_thread_rdma_init(ctx_, cfg_.gpu_buffer, cfg_.total_size, cfg_.rank,
                        cfg_.block_idx);

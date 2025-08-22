@@ -9,13 +9,6 @@
 
 class PeerCopyManager;
 
-struct PeerMeta {
-  int rank;
-  uintptr_t ptr;
-  size_t nbytes;
-  std::string ip;
-};
-
 class UcclProxy {
   friend class PeerCopyManager;
 

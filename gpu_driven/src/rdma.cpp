@@ -645,7 +645,6 @@ void remote_process_completions(ProxyCtx& S, int idx, CopyRingBuffer& g_ring,
       std::abort();
     }
     if (wc[i].opcode == IBV_WC_SEND) {
-      S.send_ack_completed++;
       continue;
     }
     if (wc[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM) {

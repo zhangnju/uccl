@@ -88,9 +88,12 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
             peer_ip=peer_ip,
         )
         proxy.set_peers_meta(peers_meta_list)
-        proxy.start_dual()
         proxies.append(proxy)
     ep.register_proxies(device_index, proxies)
+
+    dist.barrier(group)
+    for i in range(bench.num_proxies()):
+        proxies[i].start_dual()
 
     workers = None
     if hasattr(gpu_driven, "PeerCopyManager"):

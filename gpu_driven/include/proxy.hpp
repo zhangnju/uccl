@@ -19,6 +19,12 @@
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
+struct PeerMeta {
+  int rank;
+  uintptr_t ptr;
+  size_t nbytes;
+  std::string ip;
+};
 
 class Proxy {
  public:
@@ -58,11 +64,15 @@ class Proxy {
   double avg_rdma_write_us() const;
   double avg_wr_latency_us() const;
   uint64_t completed_wr() const;
+
+  void set_peers_meta(std::vector<PeerMeta> const& peers);
+
   CopyRingBuffer ring;
 
  private:
   ProxyCtx ctx_;
   void init_common();
+  void init_common_peers();
   void init_sender();
   void init_remote();
 
@@ -84,6 +94,10 @@ class Proxy {
   // Sender loop aggregates
   std::chrono::duration<double, std::micro> total_rdma_write_durations_ =
       std::chrono::duration<double, std::micro>::zero();
+
+  std::vector<PeerMeta> peers_;
+  std::vector<std::unique_ptr<ProxyCtx>> ctxs_for_all_ranks_;
+  std::vector<RDMAConnectionInfo> local_infos_, remote_infos_;
 };
 
 #endif  // PROXY_HPP

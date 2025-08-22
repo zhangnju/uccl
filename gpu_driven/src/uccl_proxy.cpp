@@ -30,6 +30,7 @@ UcclProxy::~UcclProxy() {
 
 void UcclProxy::set_peers_meta(std::vector<PeerMeta> const& peers) {
   peers_ = peers;
+  proxy_->set_peers_meta(peers);
 }
 
 void UcclProxy::start_sender() {

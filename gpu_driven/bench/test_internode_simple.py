@@ -75,7 +75,8 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     scratch_ptr = scratch.data_ptr()
     scratch_bytes = scratch.numel() * scratch.element_size()
 
-    rank2meta = get_cpu_proxies_meta(rank, scratch_ptr, scratch_bytes, num_ranks)
+    rank2meta = get_cpu_proxies_meta(rank, scratch_ptr, scratch_bytes, num_ranks, group)
+    peers_meta_list = [rank2meta[r] for r in range(num_ranks)]
 
     for i in range(bench.num_proxies()):
         proxy = gpu_driven.Proxy(
@@ -86,6 +87,7 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
             rank=rank,
             peer_ip=peer_ip,
         )
+        proxy.set_peers_meta(peers_meta_list)
         proxy.start_dual()
         proxies.append(proxy)
     ep.register_proxies(device_index, proxies)

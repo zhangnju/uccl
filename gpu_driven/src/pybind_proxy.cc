@@ -86,7 +86,43 @@ PYBIND11_MODULE(gpu_driven, m) {
       .def("stop", &UcclProxy::stop)
       .def_property_readonly("rb_addr", &UcclProxy::rb_addr)
       .def_property_readonly("block_idx", &UcclProxy::block_idx)
-      .def_property_readonly("gpu_buffer_addr", &UcclProxy::gpu_buffer_addr);
+      .def_property_readonly("gpu_buffer_addr", &UcclProxy::gpu_buffer_addr)
+      .def(
+          "set_peers_meta",
+          [](UcclProxy& self, py::object metas) {
+            std::vector<PeerMeta> v;
+            if (py::isinstance<py::list>(metas)) {
+              for (auto obj : metas.cast<py::list>()) {
+                if (py::isinstance<py::dict>(obj)) {
+                  auto d = obj.cast<py::dict>();
+                  PeerMeta pm;
+                  pm.rank = py::cast<int>(d["rank"]);
+                  pm.ptr = static_cast<uintptr_t>(
+                      py::cast<unsigned long long>(d["ptr"]));
+                  pm.nbytes = static_cast<size_t>(
+                      py::cast<unsigned long long>(d["nbytes"]));
+                  pm.ip = py::cast<std::string>(d["ip"]);
+                  v.push_back(std::move(pm));
+                } else {
+                  v.push_back(obj.cast<PeerMeta>());
+                }
+              }
+            } else {
+              // allow passing a dict directly
+              auto d = metas.cast<py::dict>();
+              PeerMeta pm;
+              pm.rank = py::cast<int>(d["rank"]);
+              pm.ptr = static_cast<uintptr_t>(
+                  py::cast<unsigned long long>(d["ptr"]));
+              pm.nbytes = static_cast<size_t>(
+                  py::cast<unsigned long long>(d["nbytes"]));
+              pm.ip = py::cast<std::string>(d["ip"]);
+              v.push_back(std::move(pm));
+            }
+            self.set_peers_meta(v);
+          },
+          py::arg("metas"),
+          "Attach peer metadata (list of dicts or PeerMeta objects).");
 
   py::class_<Bench>(m, "Bench")
       .def(py::init<>())

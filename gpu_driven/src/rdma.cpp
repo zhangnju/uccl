@@ -154,6 +154,14 @@ void per_thread_rdma_init(ProxyCtx& S, void* gpu_buf, size_t bytes, int rank,
     fprintf(stderr, "Warning: rkey already set (%x), overwriting\n", S.rkey);
   }
   S.rkey = S.mr->rkey;
+
+  cudaStream_t stream;
+  cudaError_t err = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+  if (err != cudaSuccess) {
+    fprintf(stderr, "cudaStreamCreate failed: %s\n", cudaGetErrorString(err));
+    std::abort();
+  }
+  S.cuda_stream = stream;
 }
 
 ibv_cq* create_per_thread_cq(ProxyCtx& S) {
@@ -441,12 +449,16 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
   // Group wr indices by destination rank.
   std::unordered_map<int, std::vector<size_t>> dst2idx;
   dst2idx.reserve(num_wrs);
+  std::vector<size_t> local_idxs;
+  local_idxs.reserve(8);
+
   for (size_t i = 0; i < num_wrs; ++i) {
     // TODO(MaoZiming): Command posted to local rank?
     if (cmds_to_post[i].dst_rank == static_cast<uint32_t>(my_rank)) {
-      continue;
+      local_idxs.push_back(i);
+    } else {
+      dst2idx[cmds_to_post[i].dst_rank].push_back(i);
     }
-    dst2idx[cmds_to_post[i].dst_rank].push_back(i);
   }
 
   // For each destination, build a contiguous WR chain and post to that peer's
@@ -510,6 +522,34 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
       std::abort();
     }
     S.wr_id_to_wr_ids[batch_tail_wr] = std::move(wr_ids);
+  }
+
+  if (!local_idxs.empty()) {
+    if (!S.mr) {
+      fprintf(stderr, "Self ctx missing fields for rank=%d\n", my_rank);
+      std::abort();
+    }
+    const size_t k = local_idxs.size();
+    for (size_t j = 0; j < k; ++j) {
+      const size_t i = local_idxs[j];
+      auto const& cmd = cmds_to_post[i];
+
+      // TODO(MaoZiming): fix the pointer here. For local copy.
+      void const* src = cmd.req_lptr
+                            ? reinterpret_cast<void const*>(cmd.req_lptr)
+                            : static_cast<uint8_t const*>(buf) + i * cmd.bytes;
+      void* dst = const_cast<void*>(src);
+      if (!S.cuda_stream) {
+        fprintf(stderr, "Self ctx missing CUDA stream for rank=%d\n", my_rank);
+        std::abort();
+      }
+      cudaError_t st = cudaMemcpyAsync(dst, src, static_cast<size_t>(cmd.bytes),
+                                       cudaMemcpyDefault, S.cuda_stream);
+      if (st != cudaSuccess) {
+        fprintf(stderr, "cudaMemcpyAsync failed: %s\n", cudaGetErrorString(st));
+        std::abort();
+      }
+    }
   }
 }
 

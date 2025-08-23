@@ -424,6 +424,90 @@ void post_receive_buffer_for_imm(ProxyCtx& S) {
   }
 }
 
+void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
+                             std::vector<uint64_t> const& wrs_to_post,
+                             std::vector<TransferCmd> const& cmds_to_post,
+                             std::vector<std::unique_ptr<ProxyCtx>>& ctxs) {
+  if (num_wrs == 0) return;
+  if (wrs_to_post.size() != num_wrs || cmds_to_post.size() != num_wrs) {
+    fprintf(stderr,
+            "post_rdma_async_batched: size mismatch (num_wrs=%zu, wr_ids=%zu, "
+            "cmds=%zu)\n",
+            num_wrs, wrs_to_post.size(), cmds_to_post.size());
+    std::abort();
+  }
+
+  // Group wr indices by destination rank.
+  std::unordered_map<int, std::vector<size_t>> dst2idx;
+  dst2idx.reserve(num_wrs);
+  for (size_t i = 0; i < num_wrs; ++i) {
+    dst2idx[cmds_to_post[i].dst_rank].push_back(i);
+  }
+
+  // For each destination, build a contiguous WR chain and post to that peer's
+  // QP.
+  for (auto& kv : dst2idx) {
+    int const dst = kv.first;
+    auto& idxs = kv.second;
+    if (idxs.empty()) continue;
+
+    ProxyCtx* D = ctxs[dst].get();
+    if (!D || !D->qp || !D->mr) {
+      fprintf(stderr, "Destination ctx missing fields for dst=%d\n", dst);
+      std::abort();
+    }
+
+    const size_t k = idxs.size();
+    std::vector<ibv_sge> sges(k);
+    std::vector<ibv_send_wr> wrs(k);
+    std::vector<uint64_t> wr_ids(k);
+
+    for (size_t j = 0; j < k; ++j) {
+      size_t i = idxs[j];
+      auto const& cmd = cmds_to_post[i];
+      wr_ids[j] = wrs_to_post[i];
+      sges[j].addr = cmd.req_lptr
+                         ? cmd.req_lptr
+                         : reinterpret_cast<uintptr_t>(buf) + i * cmd.bytes;
+      sges[j].length = static_cast<uint32_t>(cmd.bytes);
+      sges[j].lkey = D->mr->lkey;
+      std::memset(&wrs[j], 0, sizeof(wrs[j]));
+      wrs[j].sg_list = &sges[j];
+      wrs[j].num_sge = 1;
+      wrs[j].wr_id = wr_ids[j];
+      wrs[j].wr.rdma.remote_addr = D->remote_addr + cmd.req_rptr;
+      wrs[j].wr.rdma.rkey = D->remote_rkey;
+      wrs[j].opcode = IBV_WR_RDMA_WRITE;
+      wrs[j].send_flags = 0;
+      wrs[j].next = (j + 1 < k) ? &wrs[j + 1] : nullptr;
+    }
+    const size_t last = k - 1;
+    const uint64_t batch_tail_wr = wr_ids[last];
+    wrs[last].send_flags |= IBV_SEND_SIGNALED;
+    wrs[last].opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+    wrs[last].imm_data = htonl(static_cast<uint32_t>(batch_tail_wr));
+
+    ibv_send_wr* bad = nullptr;
+    int ret = ibv_post_send(D->qp, &wrs[0], &bad);
+    if (ret) {
+      fprintf(stderr, "ibv_post_send failed (dst=%d): %s (ret=%d)\n", dst,
+              strerror(ret), ret);
+      if (bad)
+        fprintf(stderr, "Bad WR at %p (wr_id=%lu)\n", (void*)bad, bad->wr_id);
+      std::abort();
+    }
+    S.posted.fetch_add(k, std::memory_order_relaxed);
+    if (S.wr_id_to_wr_ids.find(batch_tail_wr) != S.wr_id_to_wr_ids.end()) {
+      fprintf(
+          stderr,
+          "Error: tail wr_id %lu already exists in wr_id_to_wr_ids (dst=%d)\n",
+          batch_tail_wr, dst);
+      std::abort();
+    }
+    S.wr_id_to_wr_ids[batch_tail_wr] = std::move(wr_ids);
+  }
+}
+
 void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
                              size_t num_wrs,
                              std::vector<uint64_t> const& wrs_to_post,

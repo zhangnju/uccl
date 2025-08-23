@@ -64,8 +64,9 @@ void Proxy::init_common_peers() {
     c.context = ctx_.context;
     c.pd = ctx_.pd;
     c.mr = ctx_.mr;
+    // NOTE(MaoZiming): each context can share the same cq, but the qp must be
+    // different.
     c.cq = ctx_.cq;
-
     create_per_thread_qp(c, cfg_.gpu_buffer, cfg_.total_size,
                          &local_infos_[peer], my_rank);
     modify_qp_to_init(c);
@@ -321,9 +322,8 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
     // post_rdma_async_batched(ctx_, cfg_.gpu_buffer, kObjectSize, batch_size,
     //                         wrs_to_post, finished_wrs_, finished_wrs_mutex_,
     //                         cmds_to_post);
-    post_rdma_async_batched(ctx_, cfg_.gpu_buffer, kObjectSize, batch_size,
-                            wrs_to_post, finished_wrs_, finished_wrs_mutex_,
-                            cmds_to_post);
+    post_rdma_async_batched(ctx_, cfg_.gpu_buffer, batch_size, wrs_to_post,
+                            cmds_to_post, ctxs_for_all_ranks_);
     auto end = std::chrono::high_resolution_clock::now();
     total_rdma_write_durations_ +=
         std::chrono::duration_cast<std::chrono::microseconds>(end - start);

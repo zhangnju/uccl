@@ -144,8 +144,12 @@ void Proxy::init_common() {
 
 void Proxy::init_sender() {
   init_common();
-  // sender ACK receive ring (your existing code)
-  local_post_ack_buf(ctx_, kSenderAckQueueDepth);
+  for (auto& ctx_ptr : ctxs_for_all_ranks_) {
+    if (!ctx_ptr) continue;
+    // ack qp is different for all destination ranks.
+    // cq is shared.
+    local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
+  }
 }
 
 void Proxy::init_remote() {
@@ -180,9 +184,10 @@ void Proxy::run_dual() {
   printf("Dual (single-thread) proxy for block %d starting\n",
          cfg_.block_idx + 1);
   init_remote();
-  // == sender-only bits:
-  local_post_ack_buf(ctx_, kSenderAckQueueDepth);
-
+  for (auto& ctx_ptr : ctxs_for_all_ranks_) {
+    if (!ctx_ptr) continue;
+    local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
+  }
   uint64_t my_tail = 0;
   size_t seen = 0;
   while (ctx_.progress_run.load(std::memory_order_acquire)) {

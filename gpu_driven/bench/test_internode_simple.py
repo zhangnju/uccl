@@ -12,7 +12,6 @@ torchrun --nnodes=2 --nproc_per_node=1 --node_rank=1 \
   bench/test_internode_simple.py
 """
 
-# import argparse
 import torch
 import torch.distributed as dist
 from utils import get_cpu_proxies_meta

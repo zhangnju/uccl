@@ -87,12 +87,9 @@ def get_cpu_proxies_meta(rank, scratch_ptr, scratch_bytes, num_ranks, group):
     }
 
     all_meta = [None] * num_ranks
-    print("Before all_gather object", meta, num_ranks)
     dist.barrier(group)
     dist.all_gather_object(all_meta, meta)
     dist.barrier(group)
-    print("After all_gather object")
-
     # Build a lookup: rank -> meta
     rank2meta = {m["rank"]: m for m in all_meta}
     if rank == 0:

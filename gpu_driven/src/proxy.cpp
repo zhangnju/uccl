@@ -28,21 +28,23 @@ void Proxy::pin_thread() {
 void Proxy::set_peers_meta(std::vector<PeerMeta> const& peers) {
   peers_.clear();
   peers_.reserve(peers.size());
+  printf("setting peer metadata\n");
 
   for (auto const& p : peers) {
     peers_.push_back(p);
   }
 
   ctxs_for_all_ranks_.clear();
-  ctxs_for_all_ranks_.reserve(peers.size());
+  ctxs_for_all_ranks_.resize(peers.size());
   for (size_t i = 0; i < peers.size(); ++i) {
     ctxs_for_all_ranks_[i] = std::make_unique<ProxyCtx>();
   }
+  printf("Finished setting peer metadata\n");
 }
 
-static inline int pair_tid(int a, int b, int N) {
+static inline int pair_tid_block(int a, int b, int N, int block_idx) {
   int lo = std::min(a, b), hi = std::max(a, b);
-  return lo * N + hi;  // unique per unordered pair
+  return block_idx * (N * N) + lo * N + hi;
 }
 
 void Proxy::init_common_peers() {
@@ -64,6 +66,7 @@ void Proxy::init_common_peers() {
     c.context = ctx_.context;
     c.pd = ctx_.pd;
     c.mr = ctx_.mr;
+    c.rkey = ctx_.rkey;
     // NOTE(MaoZiming): each context can share the same cq, pd, mr.
     // but the qp must be different.
     c.cq = ctx_.cq;
@@ -79,7 +82,7 @@ void Proxy::init_common_peers() {
     if (peer == my_rank) continue;
 
     bool const i_listen = (my_rank < peer);
-    int const tid = pair_tid(my_rank, peer, num_ranks);
+    int const tid = pair_tid_block(my_rank, peer, num_ranks, cfg_.block_idx);
     char const* ip = peers_[peer].ip.c_str();
 
     int virt_rank = i_listen ? 0 : 1;
@@ -143,17 +146,17 @@ void Proxy::init_common() {
 }
 
 void Proxy::init_sender() {
-  init_common();
-  for (auto& ctx_ptr : ctxs_for_all_ranks_) {
+  init_common_peers();
+  for (int peer = 0; peer < (int)ctxs_for_all_ranks_.size(); ++peer) {
+    if (peer == cfg_.rank) continue;
+    auto& ctx_ptr = ctxs_for_all_ranks_[peer];
     if (!ctx_ptr) continue;
-    // ack qp is different for all destination ranks.
-    // cq is shared.
     local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
   }
 }
 
 void Proxy::init_remote() {
-  init_common();
+  init_common_peers();
   // Remote side ensures ack sender resources (legacy globals)
   remote_reg_ack_buf(ctx_.pd, ring.ack_buf, ring.ack_mr);
   ring.ack_qp = ctx_.ack_qp;
@@ -174,7 +177,7 @@ void Proxy::run_sender() {
 
 void Proxy::run_remote() {
   printf("Remote CPU thread for block %d started\n", cfg_.block_idx + 1);
-  init_remote();
+  init_common_peers();
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
     remote_poll_completions(ctx_, cfg_.block_idx, ring);
   }
@@ -183,13 +186,16 @@ void Proxy::run_remote() {
 void Proxy::run_dual() {
   printf("Dual (single-thread) proxy for block %d starting\n",
          cfg_.block_idx + 1);
-  init_remote();
-  for (auto& ctx_ptr : ctxs_for_all_ranks_) {
+  init_common_peers();
+  for (int peer = 0; peer < (int)ctxs_for_all_ranks_.size(); ++peer) {
+    if (peer == cfg_.rank) continue;
+    auto& ctx_ptr = ctxs_for_all_ranks_[peer];
     if (!ctx_ptr) continue;
     local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
   }
   uint64_t my_tail = 0;
   size_t seen = 0;
+  printf("run_dual initialization complete\n");
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
     poll_cq_dual(ctx_, finished_wrs_, finished_wrs_mutex_, cfg_.block_idx,
                  ring);
@@ -271,12 +277,7 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
   cmds_to_post.reserve(batch_size);
 
   for (size_t i = seen; i < cur_head; ++i) {
-    uint64_t cmd = cfg_.rb->buf[i & kQueueMask].cmd;
-    if (cmd == 0) {
-      fprintf(stderr, "Error: cmd at index %zu is zero, my_tail: %lu\n", i,
-              my_tail);
-      std::abort();
-    }
+    uint64_t cmd = cfg_.rb->volatile_load_cmd(i);
     auto last_print = std::chrono::steady_clock::now();
     size_t spin_count = 0;
     do {
@@ -301,7 +302,7 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
     } while (cmd == 0);
 
     TransferCmd& cmd_entry = cfg_.rb->buf[i];
-    if (cmd_entry.dst_rank == cfg_.rank) {
+    if (cmd_entry.dst_rank == static_cast<uint32_t>(cfg_.rank)) {
       printf("Error: sent to local rank %d\n", cfg_.rank);
       std::abort();
     }

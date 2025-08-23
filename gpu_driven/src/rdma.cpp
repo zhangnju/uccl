@@ -628,6 +628,7 @@ void local_process_completions(ProxyCtx& S,
   if (ne == 0) return;
   int send_completed = 0;
 
+  printf("local_process_completions: thread_idx=%d, ne=%d\n", thread_idx, ne);
   assert(S.ack_qp->send_cq == S.cq);
   assert(S.ack_qp->recv_cq == S.cq);
   assert(S.recv_ack_qp->send_cq == S.cq);
@@ -721,7 +722,7 @@ void remote_process_completions(ProxyCtx& S, int idx, CopyRingBuffer& g_ring,
   struct ibv_recv_wr wrs[kMaxOutstandingRecvs];
   if (ne == 0) return;
 
-  // printf("Remote thread %d processing %d completions\n", idx, ne);
+  printf("Remote thread %d processing %d completions\n", idx, ne);
   int num_wr_imm = 0;
   for (int i = 0; i < ne; ++i) {
     if (wc[i].status != IBV_WC_SUCCESS) {
@@ -855,6 +856,12 @@ void remote_send_ack(struct ibv_qp* ack_qp, uint64_t& wr_id,
 }
 
 void local_post_ack_buf(ProxyCtx& S, int depth) {
+  if (!S.pd || !S.recv_ack_qp) {
+    fprintf(stderr,
+            "local_post_ack_buf: PD/QP not ready (pd=%p, recv_ack_qp=%p)\n",
+            (void*)S.pd, (void*)S.recv_ack_qp);
+    std::abort();
+  }
   S.ack_recv_buf.resize(static_cast<size_t>(depth), 0);
   S.ack_recv_mr = ibv_reg_mr(S.pd, S.ack_recv_buf.data(),
                              S.ack_recv_buf.size() * sizeof(uint64_t),

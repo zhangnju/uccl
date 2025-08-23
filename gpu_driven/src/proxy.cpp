@@ -302,10 +302,6 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
     } while (cmd == 0);
 
     TransferCmd& cmd_entry = cfg_.rb->buf[i];
-    if (cmd_entry.dst_rank == static_cast<uint32_t>(cfg_.rank)) {
-      printf("Error: sent to local rank %d\n", cfg_.rank);
-      std::abort();
-    }
     /*
     uint64_t expected_cmd =
         (static_cast<uint64_t>(cfg_.block_idx) << 32) | (i + 1);
@@ -334,7 +330,7 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
     //                         wrs_to_post, finished_wrs_, finished_wrs_mutex_,
     //                         cmds_to_post);
     post_rdma_async_batched(ctx_, cfg_.gpu_buffer, batch_size, wrs_to_post,
-                            cmds_to_post, ctxs_for_all_ranks_);
+                            cmds_to_post, ctxs_for_all_ranks_, cfg_.rank);
     auto end = std::chrono::high_resolution_clock::now();
     total_rdma_write_durations_ +=
         std::chrono::duration_cast<std::chrono::microseconds>(end - start);

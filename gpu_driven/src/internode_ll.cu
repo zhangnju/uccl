@@ -146,6 +146,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1)
                 : 0;
         slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
+        // TODO(MaoZiming) dst_rank here can be 0.
         auto const dst_rank = dst_expert_idx / num_local_experts;
         auto const dst_expert_local_idx = dst_expert_idx % num_local_experts;
         auto const src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
@@ -555,6 +556,9 @@ __global__ __launch_bounds__(1024, 1) void combine(
   // Issue IBGDA sends
   if (responsible_expert_idx < num_experts) {
     auto const dst_rank = responsible_expert_idx / num_local_experts;
+
+    printf("dst_rank: %d, responsible_expert_idx: %d\n", dst_rank,
+           responsible_expert_idx);
     auto const local_expert_idx = responsible_expert_idx % num_local_experts;
     auto const global_expert_idx = rank * num_local_experts + local_expert_idx;
     auto const layout =

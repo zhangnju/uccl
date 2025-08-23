@@ -427,7 +427,8 @@ void post_receive_buffer_for_imm(ProxyCtx& S) {
 void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
                              std::vector<uint64_t> const& wrs_to_post,
                              std::vector<TransferCmd> const& cmds_to_post,
-                             std::vector<std::unique_ptr<ProxyCtx>>& ctxs) {
+                             std::vector<std::unique_ptr<ProxyCtx>>& ctxs,
+                             int my_rank) {
   if (num_wrs == 0) return;
   if (wrs_to_post.size() != num_wrs || cmds_to_post.size() != num_wrs) {
     fprintf(stderr,
@@ -441,6 +442,10 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
   std::unordered_map<int, std::vector<size_t>> dst2idx;
   dst2idx.reserve(num_wrs);
   for (size_t i = 0; i < num_wrs; ++i) {
+    // TODO(MaoZiming): Command posted to local rank?
+    if (cmds_to_post[i].dst_rank == static_cast<uint32_t>(my_rank)) {
+      continue;
+    }
     dst2idx[cmds_to_post[i].dst_rank].push_back(i);
   }
 

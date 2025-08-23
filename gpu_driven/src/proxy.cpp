@@ -64,8 +64,8 @@ void Proxy::init_common_peers() {
     c.context = ctx_.context;
     c.pd = ctx_.pd;
     c.mr = ctx_.mr;
-    // NOTE(MaoZiming): each context can share the same cq, but the qp must be
-    // different.
+    // NOTE(MaoZiming): each context can share the same cq, pd, mr.
+    // but the qp must be different.
     c.cq = ctx_.cq;
     create_per_thread_qp(c, cfg_.gpu_buffer, cfg_.total_size,
                          &local_infos_[peer], my_rank);
@@ -92,6 +92,7 @@ void Proxy::init_common_peers() {
     if (peer == my_rank) continue;
     auto& c = *ctxs_for_all_ranks_[peer];
 
+    // qp is different from each rank.
     modify_qp_to_rtr(c, &remote_infos_[peer]);
     modify_qp_to_rts(c, &local_infos_[peer]);
 
@@ -257,7 +258,7 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
             batch_size, kMaxInflight);
     std::abort();
   }
-    */
+  */
 
   std::vector<uint64_t> wrs_to_post;
   wrs_to_post.reserve(batch_size);
@@ -295,6 +296,10 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
     } while (cmd == 0);
 
     TransferCmd& cmd_entry = cfg_.rb->buf[i];
+    if (cmd_entry.dst_rank == cfg_.rank) {
+      printf("Error: sent to local rank %d\n", cfg_.rank);
+      std::abort();
+    }
     /*
     uint64_t expected_cmd =
         (static_cast<uint64_t>(cfg_.block_idx) << 32) | (i + 1);

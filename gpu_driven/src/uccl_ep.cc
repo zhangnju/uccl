@@ -341,7 +341,6 @@ class Buffer {
 
     // Kernel launch
     auto next_clean_meta = next_buffer.clean_meta();
-    printf("uccl::internode_ll::dispatch\n");
     auto launcher = [=](int phases) {
       uccl::internode_ll::dispatch(
           packed_recv_x.data_ptr(), packed_recv_x_scales_ptr,

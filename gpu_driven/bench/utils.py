@@ -74,27 +74,17 @@ def get_peer_ip(rank: int, num_ranks: int, group: dist.ProcessGroup):
     return peer_ip if peer_ip else ""
 
 
-def get_my_ip():
-    return _discover_local_ip()
-
-
 def get_cpu_proxies_meta(rank, scratch_ptr, scratch_bytes, num_ranks, group):
-
     meta = {
         "rank": rank,
         "ptr": int(scratch_ptr),
         "nbytes": int(scratch_bytes),
-        "ip": get_my_ip(),
+        "ip": _discover_local_ip(),
     }
-
     all_meta = [None] * num_ranks
-    dist.barrier(group)
     dist.all_gather_object(all_meta, meta)
     dist.barrier(group)
-    # Build a lookup: rank -> meta
     rank2meta = {m["rank"]: m for m in all_meta}
-    if rank == 0:
-        print("[simple-test] gathered meta:", rank2meta, flush=True)
     return rank2meta
 
 

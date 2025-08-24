@@ -28,18 +28,17 @@ void Proxy::pin_thread() {
 void Proxy::set_peers_meta(std::vector<PeerMeta> const& peers) {
   peers_.clear();
   peers_.reserve(peers.size());
-  printf("setting peer metadata\n");
-
   for (auto const& p : peers) {
     peers_.push_back(p);
+    if (cfg_.block_idx == 0)
+      printf("PeerMeta(rank=%d, ptr=0x%lx, nbytes=%zu, ip=%s)\n", p.rank,
+             static_cast<unsigned long>(p.ptr), p.nbytes, p.ip.c_str());
   }
-
   ctxs_for_all_ranks_.clear();
   ctxs_for_all_ranks_.resize(peers.size());
   for (size_t i = 0; i < peers.size(); ++i) {
     ctxs_for_all_ranks_[i] = std::make_unique<ProxyCtx>();
   }
-  printf("Finished setting peer metadata\n");
 }
 
 static inline int pair_tid_block(int a, int b, int N, int block_idx) {
@@ -94,12 +93,12 @@ void Proxy::init_common() {
     int virt_rank = i_listen ? 0 : 1;
     exchange_connection_info(virt_rank, ip, tid, &local_infos_[peer],
                              &remote_infos_[peer]);
-    if (remote_infos_[peer].addr != ctxs_for_all_ranks_[peer]->remote_addr) {
+    if (remote_infos_[peer].addr != peers_[peer].ptr) {
       fprintf(stderr,
               "Rank %d block %d: Warning: remote addr mismatch for peer %d: "
               "got 0x%lx, expected 0x%lx\n",
               my_rank, cfg_.block_idx, peer, remote_infos_[peer].addr,
-              ctxs_for_all_ranks_[peer]->remote_addr);
+              peers_[peer].ptr);
       std::abort();
     }
   }
@@ -310,9 +309,6 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
 
   if (!wrs_to_post.empty()) {
     auto start = std::chrono::high_resolution_clock::now();
-    // post_rdma_async_batched(ctx_, cfg_.gpu_buffer, kObjectSize, batch_size,
-    //                         wrs_to_post, finished_wrs_, finished_wrs_mutex_,
-    //                         cmds_to_post);
     post_rdma_async_batched(ctx_, cfg_.gpu_buffer, batch_size, wrs_to_post,
                             cmds_to_post, ctxs_for_all_ranks_, cfg_.rank);
     auto end = std::chrono::high_resolution_clock::now();

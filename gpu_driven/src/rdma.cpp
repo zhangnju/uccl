@@ -154,14 +154,6 @@ void per_thread_rdma_init(ProxyCtx& S, void* gpu_buf, size_t bytes, int rank,
     fprintf(stderr, "Warning: rkey already set (%x), overwriting\n", S.rkey);
   }
   S.rkey = S.mr->rkey;
-
-  cudaStream_t stream;
-  cudaError_t err = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-  if (err != cudaSuccess) {
-    fprintf(stderr, "cudaStreamCreate failed: %s\n", cudaGetErrorString(err));
-    std::abort();
-  }
-  S.cuda_stream = stream;
 }
 
 ibv_cq* create_per_thread_cq(ProxyCtx& S) {
@@ -469,8 +461,6 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
     const size_t k = wr_ids.size();
     std::vector<ibv_sge> sges(k);
     std::vector<ibv_send_wr> wrs(k);
-    std::vector<uint64_t> wr_ids(k);
-
     for (size_t j = 0; j < k; ++j) {
       size_t i = wr_ids[j];
       auto const& cmd = cmds_to_post[i];

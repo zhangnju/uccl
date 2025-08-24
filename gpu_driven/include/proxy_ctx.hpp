@@ -41,6 +41,4 @@ struct ProxyCtx {
 
   // Optional: per-GPU destination buffers if you previously used a global
   void* per_gpu_device_buf[NUM_GPUS] = {nullptr};
-
-  cudaStream_t cuda_stream = nullptr;
 };

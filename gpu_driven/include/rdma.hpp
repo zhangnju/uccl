@@ -53,17 +53,6 @@ void remote_send_ack(struct ibv_qp* ack_qp, uint64_t& wr_id,
                      ibv_mr* local_ack_mr, uint64_t* ack_buf, int worker_idx);
 void local_post_ack_buf(ProxyCtx& S, int depth);
 void remote_reg_ack_buf(ibv_pd* pd, uint64_t* ack_buf, ibv_mr*& ack_mr);
-
-void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
-                             size_t num_wrs, std::vector<uint64_t> wrs_to_post,
-                             std::unordered_set<uint64_t>& finished_wrs,
-                             std::mutex& finished_wrs_mutex);
-void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t bytes,
-                             size_t num_wrs,
-                             std::vector<uint64_t> const& wrs_to_post,
-                             std::unordered_set<uint64_t>& finished_wrs,
-                             std::mutex& finished_wrs_mutex,
-                             std::vector<TransferCmd> const& cmds_to_post);
 void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
                              std::vector<uint64_t> const& wrs_to_post,
                              std::vector<TransferCmd> const& cmds_to_post,

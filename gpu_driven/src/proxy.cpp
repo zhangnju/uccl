@@ -47,14 +47,20 @@ static inline int pair_tid_block(int a, int b, int N, int block_idx) {
   return block_idx * (N * N) + lo * N + hi;
 }
 
-void Proxy::init_common_peers() {
+void Proxy::init_common() {
   int const my_rank = cfg_.rank;
 
   per_thread_rdma_init(ctx_, cfg_.gpu_buffer, cfg_.total_size, my_rank,
                        cfg_.block_idx);
   pin_thread();
   if (!ctx_.cq) ctx_.cq = create_per_thread_cq(ctx_);
-
+  if (ctxs_for_all_ranks_.empty()) {
+    fprintf(stderr,
+            "Error: peers metadata not set before init_common (peers_.size() "
+            "=%zu)\n",
+            peers_.size());
+    std::abort();
+  }
   int num_ranks = ctxs_for_all_ranks_.size();
   local_infos_.assign(num_ranks, RDMAConnectionInfo{});
   remote_infos_.assign(num_ranks, RDMAConnectionInfo{});
@@ -88,6 +94,14 @@ void Proxy::init_common_peers() {
     int virt_rank = i_listen ? 0 : 1;
     exchange_connection_info(virt_rank, ip, tid, &local_infos_[peer],
                              &remote_infos_[peer]);
+    if (remote_infos_[peer].addr != ctxs_for_all_ranks_[peer]->remote_addr) {
+      fprintf(stderr,
+              "Rank %d block %d: Warning: remote addr mismatch for peer %d: "
+              "got 0x%lx, expected 0x%lx\n",
+              my_rank, cfg_.block_idx, peer, remote_infos_[peer].addr,
+              ctxs_for_all_ranks_[peer]->remote_addr);
+      std::abort();
+    }
   }
 
   // Bring each per-peer QP to RTR/RTS
@@ -115,38 +129,8 @@ void Proxy::init_common_peers() {
   }
 }
 
-void Proxy::init_common() {
-  per_thread_rdma_init(ctx_, cfg_.gpu_buffer, cfg_.total_size, cfg_.rank,
-                       cfg_.block_idx);
-  pin_thread();
-
-  // CQ + QP creation
-  ctx_.cq = create_per_thread_cq(ctx_);
-  create_per_thread_qp(ctx_, cfg_.gpu_buffer, cfg_.total_size, &local_info_,
-                       cfg_.rank);
-
-  modify_qp_to_init(ctx_);
-  exchange_connection_info(cfg_.rank, cfg_.peer_ip, cfg_.block_idx,
-                           &local_info_, &remote_info_);
-  modify_qp_to_rtr(ctx_, &remote_info_);
-  modify_qp_to_rts(ctx_, &local_info_);
-
-  ctx_.remote_addr = remote_info_.addr;
-  printf("Remote address: %p, RKey: %u\n", (void*)ctx_.remote_addr,
-         remote_info_.rkey);
-  // Add to debug file for core issue tracking
-  FILE* debug_file = fopen("/tmp/uccl_debug.txt", "a");
-  if (debug_file) {
-    fprintf(debug_file,
-            "[PROXY_INIT] Block %d: remote_addr=0x%lx, local_buffer=0x%lx\n",
-            cfg_.block_idx, ctx_.remote_addr, (uintptr_t)cfg_.gpu_buffer);
-    fclose(debug_file);
-  }
-  ctx_.remote_rkey = remote_info_.rkey;
-}
-
 void Proxy::init_sender() {
-  init_common_peers();
+  init_common();
   for (int peer = 0; peer < (int)ctxs_for_all_ranks_.size(); ++peer) {
     if (peer == cfg_.rank) continue;
     auto& ctx_ptr = ctxs_for_all_ranks_[peer];
@@ -156,7 +140,7 @@ void Proxy::init_sender() {
 }
 
 void Proxy::init_remote() {
-  init_common_peers();
+  init_common();
   // Remote side ensures ack sender resources (legacy globals)
   remote_reg_ack_buf(ctx_.pd, ring.ack_buf, ring.ack_mr);
   ring.ack_qp = ctx_.ack_qp;
@@ -177,7 +161,7 @@ void Proxy::run_sender() {
 
 void Proxy::run_remote() {
   printf("Remote CPU thread for block %d started\n", cfg_.block_idx + 1);
-  init_common_peers();
+  init_common();
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
     remote_poll_completions(ctx_, cfg_.block_idx, ring);
   }
@@ -186,7 +170,7 @@ void Proxy::run_remote() {
 void Proxy::run_dual() {
   printf("Dual (single-thread) proxy for block %d starting\n",
          cfg_.block_idx + 1);
-  init_common_peers();
+  init_common();
   for (int peer = 0; peer < (int)ctxs_for_all_ranks_.size(); ++peer) {
     if (peer == cfg_.rank) continue;
     auto& ctx_ptr = ctxs_for_all_ranks_[peer];
@@ -368,7 +352,7 @@ void Proxy::run_local() {
       }
     }
 
-    const uint64_t idx = my_tail & kQueueMask;
+    uint64_t const idx = my_tail & kQueueMask;
     uint64_t cmd;
     auto last_print = std::chrono::steady_clock::now();
     size_t spin_count = 0;

@@ -72,7 +72,6 @@ class Proxy {
  private:
   ProxyCtx ctx_;
   void init_common();
-  void init_common_peers();
   void init_sender();
   void init_remote();
 

@@ -57,10 +57,6 @@ __device__ __forceinline__ void nvshmemi_ibgda_put_nbi_warp(
       cmd.cmd = (static_cast<uint64_t>(sm_id + 1) << 32) |
                 (message_idx & 0xFFFFFFFF);  // NOTE(MaoZiming): Use sm_id + 1
                                              // to avoid 0 as a valid command.
-      if (cmd.cmd == 0) {
-        printf("Error: cmd is zero, cur_tail: %lu, cur_head: %lu\n", cur_tail,
-               cur_head);
-      }
       cmd.req_rptr = rptr_val;
       cmd.req_lptr = lptr_val;
       cmd.bytes = bytes_val;

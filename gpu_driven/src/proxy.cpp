@@ -238,22 +238,12 @@ void Proxy::notify_gpu_completion(uint64_t& my_tail) {
 }
 
 void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
-  // Force load head from DRAM
   uint64_t cur_head = cfg_.rb->volatile_head();
   if (cur_head == my_tail) {
     cpu_relax();
     return;
   }
-
   size_t batch_size = cur_head - seen;
-  /*
-  if (batch_size > static_cast<size_t>(kMaxInflight)) {
-    fprintf(stderr, "Error: batch_size %zu exceeds kMaxInflight %d\n",
-            batch_size, kMaxInflight);
-    std::abort();
-  }
-  */
-
   std::vector<uint64_t> wrs_to_post;
   wrs_to_post.reserve(batch_size);
   std::vector<TransferCmd> cmds_to_post;
@@ -265,8 +255,7 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
     size_t spin_count = 0;
     do {
       cmd = cfg_.rb->volatile_load_cmd(i);
-      cpu_relax();  // avoid hammering cacheline
-
+      cpu_relax();
       auto now = std::chrono::steady_clock::now();
       if (now - last_print > std::chrono::seconds(10)) {
         printf(
@@ -284,17 +273,7 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
       }
     } while (cmd == 0);
 
-    TransferCmd& cmd_entry = cfg_.rb->buf[i];
-    /*
-    uint64_t expected_cmd =
-        (static_cast<uint64_t>(cfg_.block_idx) << 32) | (i + 1);
-    if (cmd != expected_cmd) {
-      fprintf(stderr, "Error: block %d, expected cmd %llu, got %llu\n",
-              cfg_.block_idx, static_cast<unsigned long long>(expected_cmd),
-              static_cast<unsigned long long>(cmd));
-      std::abort();
-    }
-    */
+    TransferCmd& cmd_entry = cfg_.rb->load_cmd_entry(i);
     wrs_to_post.push_back(i);
     cmds_to_post.push_back(cmd_entry);
     wr_id_to_start_time_[i] = std::chrono::high_resolution_clock::now();
@@ -306,7 +285,6 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
             wrs_to_post.size(), batch_size);
     std::abort();
   }
-
   if (!wrs_to_post.empty()) {
     auto start = std::chrono::high_resolution_clock::now();
     post_rdma_async_batched(ctx_, cfg_.gpu_buffer, batch_size, wrs_to_post,
@@ -396,7 +374,7 @@ void Proxy::run_local() {
              cfg_.block_idx + 1, seen, cmd_entry.value);
     }
 
-    cfg_.rb->buf[idx].cmd = 0;
+    cfg_.rb->volatile_store_cmd(idx, 0);
     ++my_tail;
     // cfg_.rb->tail = my_tail;
     cfg_.rb->cpu_volatile_store_tail(my_tail);

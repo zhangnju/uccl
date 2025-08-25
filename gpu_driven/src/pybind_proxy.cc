@@ -122,8 +122,15 @@ PYBIND11_MODULE(gpu_driven, m) {
             self.set_peers_meta(v);
           },
           py::arg("metas"),
-          "Attach peer metadata (list of dicts or PeerMeta objects).");
-
+          "Attach peer metadata (list of dicts or PeerMeta objects).")
+      .def_property_readonly("gpu_buffer_addr", &UcclProxy::gpu_buffer_addr);
+  py::class_<EnvInfo>(m, "EnvInfo")
+      .def_readonly("blocks", &EnvInfo::blocks)
+      .def_readonly("queue_size", &EnvInfo::queue_size)
+      .def_readonly("threads_per_block", &EnvInfo::threads_per_block)
+      .def_readonly("iterations", &EnvInfo::iterations)
+      .def_readonly("stream_addr", &EnvInfo::stream_addr)
+      .def_readonly("rbs_addr", &EnvInfo::rbs_addr);
   py::class_<Bench>(m, "Bench")
       .def(py::init<>())
       .def("env_info", &Bench::env_info)

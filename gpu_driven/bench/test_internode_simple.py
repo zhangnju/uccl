@@ -14,7 +14,6 @@ torchrun --nnodes=2 --nproc_per_node=1 --node_rank=1 \
 
 import torch
 import torch.distributed as dist
-from utils import get_cpu_proxies_meta
 import time
 from buffer import Buffer
 import os
@@ -30,7 +29,7 @@ except ImportError as exc:
     raise
 
 
-from utils import init_dist, get_peer_ip, detect_ib_hca
+from utils import init_dist, get_peer_ip, detect_ib_hca, get_cpu_proxies_meta
 
 
 def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):

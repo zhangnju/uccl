@@ -40,16 +40,7 @@ class Proxy {
     bool pin_thread = true;
   };
 
-  explicit Proxy(Config const& cfg) : cfg_(cfg) {
-    const size_t total_size = kRemoteBufferSize;
-    for (int d = 0; d < NUM_GPUS; ++d) {
-      GPU_RT_CHECK(gpuSetDevice(d));
-      void* buf = nullptr;
-      GPU_RT_CHECK(gpuMalloc(&buf, total_size));
-      ctx_.per_gpu_device_buf[d] = buf;
-    }
-    GPU_RT_CHECK(gpuSetDevice(0));
-  }
+  explicit Proxy(Config const& cfg) : cfg_(cfg) {}
 
   void set_progress_run(bool run) {
     ctx_.progress_run.store(run, std::memory_order_release);
@@ -96,6 +87,7 @@ class Proxy {
 
   std::vector<PeerMeta> peers_;
   std::vector<std::unique_ptr<ProxyCtx>> ctxs_for_all_ranks_;
+  std::unordered_map<uint32_t, ProxyCtx*> qpn2ctx_;
   std::vector<RDMAConnectionInfo> local_infos_, remote_infos_;
 };
 

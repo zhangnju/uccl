@@ -66,7 +66,6 @@ void Proxy::init_common() {
 
   // Per peer QP initialization
   for (int peer = 0; peer < num_ranks; ++peer) {
-    if (peer == my_rank) continue;
     auto& c = *ctxs_for_all_ranks_[peer];
     c.context = ctx_.context;
     c.pd = ctx_.pd;
@@ -78,6 +77,15 @@ void Proxy::init_common() {
     create_per_thread_qp(c, cfg_.gpu_buffer, cfg_.total_size,
                          &local_infos_[peer], my_rank);
     modify_qp_to_init(c);
+    qpn2ctx_[c.qp->qp_num] = &c;
+    qpn2ctx_[c.ack_qp->qp_num] = &c;
+    qpn2ctx_[c.recv_ack_qp->qp_num] = &c;
+    printf("c.qp->qp_num=%u, c=%p added to qpn2ctx_\n", c.qp->qp_num,
+           (void*)&c);
+    printf("c.ack_qp->qp_num=%u, c=%p added to qpn2ctx_\n", c.ack_qp->qp_num,
+           (void*)&c);
+    printf("c.recv_ack_qp->qp_num=%u, c=%p added to qpn2ctx_\n",
+           c.recv_ack_qp->qp_num, (void*)&c);
   }
 
   usleep(50 * 1000);
@@ -91,6 +99,14 @@ void Proxy::init_common() {
     char const* ip = peers_[peer].ip.c_str();
 
     int virt_rank = i_listen ? 0 : 1;
+    if (peers_[cfg_.rank].ptr != local_infos_[my_rank].addr) {
+      fprintf(stderr,
+              "Rank %d block %d: Warning: local addr mismatch: got 0x%lx, "
+              "expected 0x%lx\n",
+              my_rank, cfg_.block_idx, local_infos_[my_rank].addr,
+              peers_[cfg_.rank].ptr);
+      std::abort();
+    }
     exchange_connection_info(virt_rank, ip, tid, &local_infos_[peer],
                              &remote_infos_[peer]);
     if (remote_infos_[peer].addr != peers_[peer].ptr) {
@@ -126,43 +142,45 @@ void Proxy::init_common() {
       fclose(f);
     }
   }
+
+  usleep(50 * 1000);
 }
 
 void Proxy::init_sender() {
   init_common();
-  for (int peer = 0; peer < (int)ctxs_for_all_ranks_.size(); ++peer) {
-    if (peer == cfg_.rank) continue;
-    auto& ctx_ptr = ctxs_for_all_ranks_[peer];
-    if (!ctx_ptr) continue;
-    local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
-  }
+  assert(cfg_.rank == 0);
+  auto& ctx_ptr = ctxs_for_all_ranks_[1];
+  local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
 }
 
 void Proxy::init_remote() {
   init_common();
-  // Remote side ensures ack sender resources (legacy globals)
-  remote_reg_ack_buf(ctx_.pd, ring.ack_buf, ring.ack_mr);
-  ring.ack_qp = ctx_.ack_qp;
-  post_receive_buffer_for_imm(ctx_);
+  assert(cfg_.rank == 1);
+  auto& ctx_ptr = ctxs_for_all_ranks_[0];
+  remote_reg_ack_buf(ctx_ptr->pd, ring.ack_buf, ring.ack_mr);
+  ring.ack_qp = ctx_ptr->ack_qp;
+  post_receive_buffer_for_imm(*ctx_ptr);
 }
 
 void Proxy::run_sender() {
   printf("CPU sender thread for block %d started\n", cfg_.block_idx + 1);
   init_sender();
   size_t seen = 0;
+  uint64_t my_tail = 0;
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
     local_poll_completions(ctx_, finished_wrs_, finished_wrs_mutex_,
-                           cfg_.block_idx);
-    notify_gpu_completion(cfg_.rb->tail);
-    post_gpu_command(cfg_.rb->tail, seen);
+                           cfg_.block_idx, qpn2ctx_);
+    notify_gpu_completion(my_tail);
+    post_gpu_command(my_tail, seen);
   }
 }
 
 void Proxy::run_remote() {
   printf("Remote CPU thread for block %d started\n", cfg_.block_idx + 1);
-  init_common();
+  init_remote();
+  printf("Finished\n");
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
-    remote_poll_completions(ctx_, cfg_.block_idx, ring);
+    remote_poll_completions(ctx_, cfg_.block_idx, ring, qpn2ctx_);
   }
 }
 
@@ -180,8 +198,8 @@ void Proxy::run_dual() {
   size_t seen = 0;
   printf("run_dual initialization complete\n");
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
-    poll_cq_dual(ctx_, finished_wrs_, finished_wrs_mutex_, cfg_.block_idx,
-                 ring);
+    poll_cq_dual(ctx_, finished_wrs_, finished_wrs_mutex_, cfg_.block_idx, ring,
+                 qpn2ctx_);
     notify_gpu_completion(my_tail);
     post_gpu_command(my_tail, seen);
   }

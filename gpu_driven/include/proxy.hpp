@@ -40,7 +40,22 @@ class Proxy {
     bool pin_thread = true;
   };
 
-  explicit Proxy(Config const& cfg) : cfg_(cfg) {}
+  explicit Proxy(Config const& cfg) : cfg_(cfg) {
+    const size_t total_size = kRemoteBufferSize;
+    int nDevices;
+    cudaError_t err = cudaGetDeviceCount(&nDevices);
+    if (err != cudaSuccess) {
+      printf("CUDA error: %s\n", cudaGetErrorString(err));
+      std::abort();
+    }
+    for (int d = 0; d < nDevices; ++d) {
+      GPU_RT_CHECK(gpuSetDevice(d));
+      void* buf = nullptr;
+      GPU_RT_CHECK(gpuMalloc(&buf, total_size));
+      ctx_.per_gpu_device_buf[d] = buf;
+    }
+    GPU_RT_CHECK(gpuSetDevice(0));
+  }
 
   void set_progress_run(bool run) {
     ctx_.progress_run.store(run, std::memory_order_release);

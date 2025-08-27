@@ -612,7 +612,12 @@ void remote_process_completions(
 
   std::vector<CopyTask> task_vec;
   task_vec.reserve(ne);
-
+  int nDevices;
+  cudaError_t err = cudaGetDeviceCount(&nDevices);
+  if (err != cudaSuccess) {
+    printf("CUDA error: %s\n", cudaGetErrorString(err));
+    std::abort();
+  }
   for (int i = 0; i < ne; ++i) {
     ibv_wc const& cqe = wc[i];
     if (cqe.status != IBV_WC_SUCCESS) {
@@ -636,7 +641,7 @@ void remote_process_completions(
       if (cqe.opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
         // NOTE: imm_data is network byte order per verbs; convert:
         uint32_t imm = ntohl(cqe.imm_data);
-        int destination_gpu = static_cast<int>(imm % NUM_GPUS);
+        int destination_gpu = static_cast<int>(imm % nDevices);
         size_t src_offset = static_cast<size_t>(S.pool_index) * kObjectSize;
         CopyTask task{.wr_id = imm,
                       .dst_dev = destination_gpu,

@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.distributed as dist
-from typing import Callable, Tuple, Optional
+from typing import Callable, Tuple, Optional, Union
 
 try:
     from uccl import uccl_ep as ep
@@ -153,6 +153,102 @@ class Buffer:
 
         self.runtime.destroy()
         self.runtime = None
+
+    @staticmethod
+    def is_sm90_compiled():
+        return ep.is_sm90_compiled()
+
+    @staticmethod
+    def set_num_sms(new_num_sms: int) -> None:
+        """
+        Set the number of SMs to use in high-throughput kernels.
+
+        Arguments:
+            new_num_sms: the new number to be set.
+        """
+
+        assert new_num_sms % 2 == 0, "The SM count must be even"
+        Buffer.num_sms = new_num_sms
+
+    @staticmethod
+    def capture() -> EventOverlap:
+        """
+        Capture a CUDA event on the current stream, i.e. `torch.cuda.current_stream()`.
+
+        Returns:
+            event: the captured event.
+        """
+        return EventOverlap(ep.EventHandle())
+
+    @staticmethod
+    def get_low_latency_rdma_size_hint(
+        num_max_dispatch_tokens_per_rank: int,
+        hidden: int,
+        num_ranks: int,
+        num_experts: int,
+    ) -> int:
+        """
+        Get a minimum size requirement for the RDMA buffer. The size calculation will be done with BF16.
+
+        Arguments:
+            num_max_dispatch_tokens_per_rank: the maximum number of tokens to dispatch, all the ranks must hold the same value.
+            hidden: the hidden dimension of each token.
+            num_ranks: the number of EP group ranks.
+            num_experts: the number of all experts.
+
+        Returns:
+            size: the RDMA buffer size recommended.
+        """
+        return ep.get_low_latency_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts
+        )
+
+    def get_comm_stream(self) -> torch.Stream:
+        """
+        Get the communication stream.
+
+        Returns:
+            stream: the communication stream.
+        """
+        ts: torch.Stream = self.runtime.get_comm_stream()
+        return torch.cuda.Stream(
+            stream_id=ts.stream_id,
+            device_index=ts.device_index,
+            device_type=ts.device_type,
+        )
+
+    def get_local_buffer_tensor(
+        self,
+        dtype: torch.dtype,
+        size: Optional[torch.Size] = None,
+        offset: int = 0,
+        use_rdma_buffer: bool = False,
+    ) -> torch.Tensor:
+        """
+        Get the raw buffer (slice supported) as a PyTorch tensor.
+
+        Argument:
+            dtype: the data type (PyTorch `dtype`) for the tensor.
+            size: the slice size (by elements) to get from the buffer.
+            offset: the offset of the beginning element.
+            use_rdma_buffer: whether to return the RDMA buffer.
+        """
+        tensor = self.runtime.get_local_buffer_tensor(dtype, offset, use_rdma_buffer)
+        if size is None:
+            return tensor
+
+        assert tensor.numel() >= size.numel()
+        return tensor[: size.numel()].view(size)
+
+    @staticmethod
+    def _unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
+        bias_0, bias_1 = None, None
+        if isinstance(bias, torch.Tensor):
+            bias_0 = bias
+        elif isinstance(bias, tuple):
+            assert len(bias) == 2
+            bias_0, bias_1 = bias
+        return bias_0, bias_1
 
     # noinspection PyTypeChecker
     def low_latency_dispatch(
@@ -345,4 +441,55 @@ class Buffer:
             combined_x,
             EventOverlap(event, tensors_to_record if async_finish else None),
             hook,
+        )
+
+    # noinspection PyTypeChecker
+    def get_dispatch_layout(
+        self,
+        topk_idx: torch.Tensor,
+        num_experts: int,
+        previous_event: Optional[EventOverlap] = None,
+        async_finish: bool = False,
+        allocate_on_comm_stream: bool = False,
+    ) -> Tuple[
+        torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor, EventOverlap
+    ]:
+        """
+        Calculate the layout required for later communication.
+
+        Arguments:
+            topk_idx: `[num_tokens, num_topk]`, dtype must be `torch.int64`, the expert indices selected by each token,
+                `-1` means no selections.
+            num_experts: the number of experts.
+            previous_event: the event to wait before actually executing the kernel.
+            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
+
+        Returns:
+            num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
+            num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
+                rank (with the same GPU index), return `None` for intranode settings.
+            num_tokens_per_expert: `[num_experts]` with `torch.int`, the number of tokens to be sent to each expert.
+            is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
+            event: the event after executing the kernel (valid only if `async_finish` is set).
+        """
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            event,
+        ) = self.runtime.get_dispatch_layout(
+            topk_idx,
+            num_experts,
+            getattr(previous_event, "event", None),
+            async_finish,
+            allocate_on_comm_stream,
+        )
+        return (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            EventOverlap(event),
         )

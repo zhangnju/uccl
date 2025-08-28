@@ -196,6 +196,8 @@ class Buffer {
     }
   }
 
+  torch::Stream get_comm_stream() const { return comm_stream; }
+
   void destroy() {
     EP_HOST_ASSERT(not destroyed);
 
@@ -508,6 +510,77 @@ class Buffer {
     return {combined_x, event, recv_hook};
   }
 
+  std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor,
+             torch::Tensor, std::optional<EventHandle>>
+  Buffer::get_dispatch_layout(torch::Tensor const& topk_idx, int num_experts,
+                              std::optional<EventHandle>& previous_event,
+                              bool async, bool allocate_on_comm_stream) {
+    EP_HOST_ASSERT(topk_idx.dim() == 2);
+    EP_HOST_ASSERT(topk_idx.is_contiguous());
+    EP_HOST_ASSERT(num_experts > 0);
+
+    // Allocate all tensors on comm stream if set
+    // NOTES: do not allocate tensors upfront!
+    auto compute_stream = at::cuda::getCurrentCUDAStream();
+    if (allocate_on_comm_stream) {
+      EP_HOST_ASSERT(previous_event.has_value() and async);
+      at::cuda::setCurrentCUDAStream(comm_stream);
+    }
+
+    // Wait previous tasks to be finished
+    if (previous_event.has_value()) {
+      stream_wait(comm_stream, previous_event.value());
+    } else {
+      stream_wait(comm_stream, compute_stream);
+    }
+
+    auto num_tokens = static_cast<int>(topk_idx.size(0)),
+         num_topk = static_cast<int>(topk_idx.size(1));
+    auto num_tokens_per_rank =
+        torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
+    auto num_tokens_per_rdma_rank = std::optional<torch::Tensor>();
+    auto num_tokens_per_expert =
+        torch::empty({num_experts}, dtype(torch::kInt32).device(torch::kCUDA));
+    auto is_token_in_rank = torch::empty(
+        {num_tokens, num_ranks}, dtype(torch::kBool).device(torch::kCUDA));
+    if (is_internode_available())
+      num_tokens_per_rdma_rank = torch::empty(
+          {num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
+
+    layout::get_dispatch_layout(
+        topk_idx.data_ptr<int64_t>(), num_tokens_per_rank.data_ptr<int>(),
+        num_tokens_per_rdma_rank.has_value()
+            ? num_tokens_per_rdma_rank.value().data_ptr<int>()
+            : nullptr,
+        num_tokens_per_expert.data_ptr<int>(),
+        is_token_in_rank.data_ptr<bool>(), num_tokens, num_topk, num_ranks,
+        num_experts, comm_stream);
+
+    // Wait streams
+    std::optional<EventHandle> event;
+    if (async) {
+      event = EventHandle(comm_stream);
+      for (auto& t : {topk_idx, num_tokens_per_rank, num_tokens_per_expert,
+                      is_token_in_rank}) {
+        t.record_stream(comm_stream);
+        if (allocate_on_comm_stream) t.record_stream(compute_stream);
+      }
+      for (auto& to : {num_tokens_per_rdma_rank}) {
+        to.has_value() ? to->record_stream(comm_stream) : void();
+        if (allocate_on_comm_stream)
+          to.has_value() ? to->record_stream(compute_stream) : void();
+      }
+    } else {
+      stream_wait(compute_stream, comm_stream);
+    }
+
+    // Switch back compute stream
+    if (allocate_on_comm_stream) at::cuda::setCurrentCUDAStream(compute_stream);
+
+    return {num_tokens_per_rank, num_tokens_per_rdma_rank,
+            num_tokens_per_expert, is_token_in_rank, event};
+  }
+
   int get_local_device_id() { return device_index; }
 
   pybind11::bytearray get_local_ipc_handle() const {
@@ -673,6 +746,14 @@ class Buffer {
   uint64_t* d_ring_addrs{nullptr};
 };
 
+bool is_sm90_compiled() {
+#ifndef DISABLE_SM90_FEATURES
+  return true;
+#else
+  return false;
+#endif
+}
+
 PYBIND11_MODULE(uccl_ep, m) {
   m.doc() = "Minimal DeepEP-compatible shim with UCCL";
   m.def(
@@ -764,5 +845,9 @@ PYBIND11_MODULE(uccl_ep, m) {
            py::arg("num_max_dispatch_tokens_per_rank") = 0,
            py::arg("num_experts") = 1, py::arg("use_logfmt") = false,
            py::arg("zero_copy") = false, py::arg("async") = false,
-           py::arg("return_recv_hook") = false, py::arg("out") = py::none());
+           py::arg("return_recv_hook") = false, py::arg("out") = py::none())
+      .def("get_dispatch_layout", &deep_ep::Buffer::get_dispatch_layout)
+      .def("get_comm_stream", &deep_ep::Buffer::get_comm_stream);
+
+  m.def("is_sm90_compiled", deep_ep::is_sm90_compiled);
 }

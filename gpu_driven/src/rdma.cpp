@@ -662,6 +662,7 @@ void remote_process_completions(
         uint32_t imm = ntohl(cqe.imm_data);
         int destination_gpu = static_cast<int>(imm % nDevices);
         size_t src_offset = static_cast<size_t>(S.pool_index) * kObjectSize;
+        // TODO(MaoZiming): Implement the logic to set dst_ptr
         CopyTask task{.wr_id = imm,
                       .dst_dev = destination_gpu,
                       .src_ptr = static_cast<char*>(S.mr->addr) + src_offset,

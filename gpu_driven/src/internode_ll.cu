@@ -149,39 +149,14 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
         auto const dst_rank = dst_expert_idx / num_local_experts;
         auto const dst_expert_local_idx = dst_expert_idx % num_local_experts;
         auto const src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
-
-        // ORIGINAL CODE: Calculate absolute destination address using local
-        // rdma_recv_x base auto const dst_ptr =
-        //     reinterpret_cast<uint64_t>(rdma_recv_x) +
-        //     dst_expert_local_idx * num_ranks *
-        //         num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-        //     rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-        //     slot_idx * num_bytes_per_msg;
-
-        // NEW APPROACH: Calculate offset within entire LowLatencyLayout buffer
-        // for CPU proxy translation The CPU proxy's S.remote_addr points to the
-        // base of the remote rdma_buffer, so we need to calculate the offset
-        // from rdma_buffer base to the target location in rdma_recv_x
-        //
-        // From LowLatencyLayout: rdma_recv_x = rdma_buffer +
-        // signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 +
-        // recv_buffer_bytes * i For the current buffer (i=0), we need to add
-        // this base offset plus the message offset
-        // auto const rdma_recv_x_offset_in_buffer =
-        //     reinterpret_cast<uint64_t>(rdma_recv_x) -
-        //     reinterpret_cast<uint64_t>(rdma_recv_x) +
-        //     (dst_expert_local_idx * num_ranks *
-        //          num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-        //      rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
-        //      slot_idx * num_bytes_per_msg);
-        // Actually, let's use the original approach but document that
-        // S.remote_addr should point to rdma_recv_x base
+        // Pass offset relative to dispatch_rdma_recv_data_buffer (rdma_recv_x)
+        // CPU proxy will add the base offset of dispatch_rdma_recv_data_buffer
+        // within rdma_buffer
         auto const dst_offset =
             dst_expert_local_idx * num_ranks *
                 num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
             rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg +
             slot_idx * num_bytes_per_msg;
-
 #ifdef false
         auto const dst_p2p_ptr =
             uccl::nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
@@ -283,16 +258,18 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                              responsible_expert_idx) != FINISHED_SUM_TAG * 2)
       ;
     // TODO(yihan): Mark here for future debugging check.
-    // ORIGINAL CODE: Calculate absolute destination address for atomic
-    // operation auto dst_ptr = reinterpret_cast<uint64_t>(
-    //     rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
+    // Calculate offset within LowLatencyLayout buffer for CPU proxy translation
+    // Calculate offset relative to dispatch_rdma_recv_data_buffer (rdma_recv_x)
+    // CPU proxy will translate this to the correct
+    // dispatch_rdma_recv_count_buffer address
 
-    // NEW APPROACH: Calculate offset within LowLatencyLayout buffer for CPU
-    // proxy translation
+    // FIX: Ensure 8-byte alignment for 64-bit atomic operations
+    // Calculate index, multiply by 8 instead of 4, then add to base
+    auto count_index = dst_expert_local_idx * num_ranks + rank;
+    auto aligned_count_addr = reinterpret_cast<uint64_t>(rdma_recv_count) +
+                              count_index * sizeof(uint64_t);
     auto dst_offset =
-        reinterpret_cast<uint64_t>(rdma_recv_count +
-                                   dst_expert_local_idx * num_ranks + rank) -
-        reinterpret_cast<uint64_t>(rdma_recv_count);
+        aligned_count_addr - reinterpret_cast<uint64_t>(rdma_recv_x);
 #ifdef false
     auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
     if (dst_p2p_ptr == 0) {
@@ -304,9 +281,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                             -num_tokens_sent - 1);
     }
 #else
-    // NOTE(MaoZiming): Without ibgda, we can only use atomic add.
-    // CHANGE: Pass offset instead of absolute address to CPU proxy for atomic
-    // operation
+    // Pass offset to CPU proxy for atomic operation
     uccl::nvshmemi_ibgda_amo_nonfetch_add(
         reinterpret_cast<int*>(dst_offset), -num_tokens_sent - 1, dst_rank,
         sm_id, dst_expert_local_idx, false, ring_addrs, num_ring_addrs);
@@ -362,19 +337,35 @@ LOW_LATENCY_DISPATCH_RECV:
     EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
     if (sub_warp_id == 1 and lane_id == 0) {
       auto start_time = clock64();
-      while ((num_recv_tokens = ld_acquire_sys_global(
-                  rdma_recv_count + local_expert_idx * num_ranks + src_rank)) ==
-             0)
+      // FIX: Use same 8-byte aligned address calculation as sender
+      // Fixed: Calculate index, multiply by 8, then cast to int* for
+      // compatibility
+      auto count_index = local_expert_idx * num_ranks + src_rank;
+      auto aligned_count_addr = reinterpret_cast<uint64_t>(rdma_recv_count) +
+                                count_index * sizeof(uint64_t);
+      int* count_addr = reinterpret_cast<int*>(aligned_count_addr);
+
+      while ((num_recv_tokens = ld_acquire_sys_global(count_addr)) == 0)
         ;
+
+      printf(
+          "[RECV_COUNT_SUCCESS] Received non-zero count: %d at addr=%p "
+          "[ATOMIC_WORKED!]\n",
+          num_recv_tokens, count_addr);
+
       auto wait_recv_cost = clock64() - start_time;
       num_recv_tokens = -num_recv_tokens - 1;
+
+      printf(
+          "[RECV_COUNT_DECODED] Decoded token count: %d (from received value "
+          "%d)\n",
+          num_recv_tokens, -num_recv_tokens - 1);
       recv_token_begin_idx =
           atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
       shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
       shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
       recv_range[src_rank] =
           pack2<int, int64_t>(num_recv_tokens, recv_token_begin_idx);
-
       // Add stats for diagnosis
       if (cumulative_local_expert_recv_stats != nullptr)
         atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx,
@@ -791,9 +782,22 @@ __global__ __launch_bounds__(1024, 1) void combine(
     if (sub_warp_id == 1 and lane_id == 0) {
       while (ld_acquire_global(atomic_clean_flag) == 0)
         ;
+      // Calculate offset from data buffer to flag buffer (similar to dispatch
+      // phase) rdma_recv_flag corresponds to combine_rdma_recv_flag_buffer We
+      // need to calculate the offset from rdma_recv_x (data buffer) to the flag
+      // buffer
+      auto dst_offset =
+          reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx) -
+          reinterpret_cast<uint64_t>(rdma_recv_x);
+
+      printf(
+          "[GPU_COMBINE_ATOMIC_DEBUG] rdma_recv_flag=%p, rdma_recv_x=%p, "
+          "global_expert_idx=%d, dst_offset=0x%lx\n",
+          rdma_recv_flag, rdma_recv_x, global_expert_idx, dst_offset);
+
+#ifdef false
       auto dst_ptr =
           reinterpret_cast<uint64_t>(rdma_recv_flag + global_expert_idx);
-#ifdef false
       auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
       if (dst_p2p_ptr == 0) {
         nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1,
@@ -803,7 +807,9 @@ __global__ __launch_bounds__(1024, 1) void combine(
       }
 #else
       // NOTE(MaoZiming): Without ibgda, we can only use atomic add
-      nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), 1,
+      // Pass offset to CPU proxy for atomic operation (similar to dispatch
+      // phase)
+      nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_offset), 1,
                                       dst_rank, sm_id, local_expert_idx, false,
                                       ring_addrs, num_ring_addrs);
 #endif

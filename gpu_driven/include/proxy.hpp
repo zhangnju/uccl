@@ -55,6 +55,11 @@ class Proxy {
     ctx_.progress_run.store(run, std::memory_order_release);
   }
 
+  // Set the offset of dispatch_rdma_recv_data_buffer within rdma_buffer
+  void set_dispatch_recv_data_offset(uintptr_t offset) {
+    ctx_.dispatch_recv_data_offset = offset;
+  }
+
   void run_sender();
   void run_remote();
   void run_local();
@@ -74,6 +79,10 @@ class Proxy {
 
   void notify_gpu_completion(uint64_t& my_tail);
   void post_gpu_command(uint64_t& my_tail, size_t& seen);
+  void post_gpu_commands_mixed(std::vector<uint64_t> const& wrs_to_post,
+                               std::vector<TransferCmd> const& cmds_to_post);
+  void post_atomic_operations(std::vector<uint64_t> const& wrs_to_post,
+                              std::vector<TransferCmd> const& cmds_to_post);
 
   Config cfg_;
   RDMAConnectionInfo local_info_{}, remote_info_{};

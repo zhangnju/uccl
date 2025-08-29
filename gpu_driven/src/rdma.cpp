@@ -435,7 +435,7 @@ void post_receive_buffer_for_imm(ProxyCtx& S) {
 }
 
 void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
-                             std::vector<uint64_t> const&wrs_to_post,
+                             std::vector<uint64_t> const& wrs_to_post,
                              std::vector<TransferCmd> const& cmds_to_post,
                              std::vector<std::unique_ptr<ProxyCtx>>& ctxs,
                              int my_rank) {

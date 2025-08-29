@@ -452,7 +452,7 @@ void Proxy::post_gpu_commands_mixed(
   std::vector<TransferCmd> rdma_cmds, atomic_cmds;
 
   for (size_t i = 0; i < cmds_to_post.size(); ++i) {
-    if (cmds_to_post[i].cmd == 1) {
+    if (cmds_to_post[i].is_atomic) {
       // Atomic operation (cmd.cmd == 1)
       atomic_wrs.push_back(wrs_to_post[i]);
       atomic_cmds.push_back(cmds_to_post[i]);

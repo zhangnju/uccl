@@ -625,7 +625,7 @@ void remote_process_completions(
     std::unordered_map<uint32_t, ProxyCtx*> const& qpn2ctx) {
   if (ne == 0) return;
 
-  printf("Remote thread %d received %d completions\n", idx, ne);
+  // printf("Remote thread %d received %d completions\n", idx, ne);
   std::unordered_map<uint32_t, std::vector<ibv_recv_wr>> per_qp;
   per_qp.reserve(8);
 

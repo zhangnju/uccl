@@ -465,9 +465,8 @@ void Proxy::post_gpu_commands_mixed(
 
   // Handle regular RDMA writes
   if (!rdma_wrs.empty()) {
-    post_rdma_async_batched(ctx_, cfg_.gpu_buffer, kObjectSize, rdma_wrs.size(),
-                            rdma_wrs, finished_wrs_, finished_wrs_mutex_,
-                            rdma_cmds);
+    post_rdma_async_batched(ctx_, cfg_.gpu_buffer, rdma_wrs.size(), rdma_wrs,
+                            rdma_cmds, ctxs_for_all_ranks_, cfg_.rank);
   }
 
   // Handle atomic operations

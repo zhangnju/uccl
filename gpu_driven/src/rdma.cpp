@@ -434,8 +434,8 @@ void post_receive_buffer_for_imm(ProxyCtx& S) {
   }
 }
 
-void post_rdma_async_batched(ProxyCtx& S, void* buf,
-                             size_t num_wrs, std::vector<uint64_t> wrs_to_post,
+void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
+                             std::vector<uint64_t> const&wrs_to_post,
                              std::vector<TransferCmd> const& cmds_to_post,
                              std::vector<std::unique_ptr<ProxyCtx>>& ctxs,
                              int my_rank) {
@@ -482,7 +482,8 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf,
       wrs[j].sg_list = &sges[j];
       wrs[j].num_sge = 1;
       wrs[j].wr_id = wr_ids[j];
-      wrs[j].wr.rdma.remote_addr =  S.remote_addr + S.dispatch_recv_data_offset + cmd.req_rptr;
+      wrs[j].wr.rdma.remote_addr =
+          S.remote_addr + S.dispatch_recv_data_offset + cmd.req_rptr;
       wrs[j].wr.rdma.rkey = ctx->remote_rkey;
       wrs[j].opcode = IBV_WR_RDMA_WRITE;
       wrs[j].send_flags = 0;
@@ -683,7 +684,7 @@ void remote_process_completions(
       fprintf(stderr, "ibv_post_recv failed for qpn=%u: %s\n", qpn,
               strerror(ret));
       std::abort();
-    } 
+    }
   }
   if (!task_vec.empty()) {
     while (!g_ring.pushN(task_vec.data(), task_vec.size())) {

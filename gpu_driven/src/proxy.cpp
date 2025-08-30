@@ -28,10 +28,40 @@ void Proxy::pin_thread() {
   }
 }
 
+void Proxy::set_peers_meta(std::vector<PeerMeta> const& peers) {
+  peers_.clear();
+  peers_.reserve(peers.size());
+  for (auto const& p : peers) {
+    peers_.push_back(p);
+    if (cfg_.block_idx == 0)
+      printf("PeerMeta(rank=%d, ptr=0x%lx, nbytes=%zu, ip=%s)\n", p.rank,
+             static_cast<unsigned long>(p.ptr), p.nbytes, p.ip.c_str());
+  }
+  ctxs_for_all_ranks_.clear();
+  ctxs_for_all_ranks_.resize(peers.size());
+  for (size_t i = 0; i < peers.size(); ++i) {
+    ctxs_for_all_ranks_[i] = std::make_unique<ProxyCtx>();
+  }
+}
+
+static inline int pair_tid_block(int a, int b, int N, int block_idx) {
+  int lo = std::min(a, b), hi = std::max(a, b);
+  return block_idx * (N * N) + lo * N + hi;
+}
+
 void Proxy::init_common() {
-  per_thread_rdma_init(ctx_, cfg_.gpu_buffer, cfg_.total_size, cfg_.rank,
+  int const my_rank = cfg_.rank;
+
+  per_thread_rdma_init(ctx_, cfg_.gpu_buffer, cfg_.total_size, my_rank,
                        cfg_.block_idx);
   pin_thread();
+  if (ctxs_for_all_ranks_.empty()) {
+    fprintf(stderr,
+            "Error: peers metadata not set before init_common (peers_.size() "
+            "=%zu)\n",
+            peers_.size());
+    std::abort();
+  }
 
   // Allocate GPU buffer for atomic old values (within the main GPU buffer)
   // Use a small section at the end of the GPU buffer
@@ -70,55 +100,146 @@ void Proxy::init_common() {
             cfg_.block_idx, ctx_.remote_addr, (uintptr_t)cfg_.gpu_buffer);
     fclose(debug_file);
   }
-  ctx_.remote_rkey = remote_info_.rkey;
+  int num_ranks = ctxs_for_all_ranks_.size();
+  local_infos_.assign(num_ranks, RDMAConnectionInfo{});
+  remote_infos_.assign(num_ranks, RDMAConnectionInfo{});
+
+  // Per peer QP initialization
+  for (int peer = 0; peer < num_ranks; ++peer) {
+    auto& c = *ctxs_for_all_ranks_[peer];
+    c.context = ctx_.context;
+    c.pd = ctx_.pd;
+    c.mr = ctx_.mr;
+    c.rkey = ctx_.rkey;
+    // NOTE(MaoZiming): each context can share the same cq, pd, mr.
+    // but the qp must be different.
+    c.cq = ctx_.cq;
+    create_per_thread_qp(c, cfg_.gpu_buffer, cfg_.total_size,
+                         &local_infos_[peer], my_rank);
+    modify_qp_to_init(c);
+    qpn2ctx_[c.qp->qp_num] = &c;
+    qpn2ctx_[c.ack_qp->qp_num] = &c;
+    qpn2ctx_[c.recv_ack_qp->qp_num] = &c;
+    printf("c.qp->qp_num=%u, c=%p added to qpn2ctx_\n", c.qp->qp_num,
+           (void*)&c);
+    printf("c.ack_qp->qp_num=%u, c=%p added to qpn2ctx_\n", c.ack_qp->qp_num,
+           (void*)&c);
+    printf("c.recv_ack_qp->qp_num=%u, c=%p added to qpn2ctx_\n",
+           c.recv_ack_qp->qp_num, (void*)&c);
+  }
+
+  usleep(50 * 1000);
+
+  // Out-of-band exchange per pair.
+  for (int peer = 0; peer < num_ranks; ++peer) {
+    if (peer == my_rank) continue;
+
+    bool const i_listen = (my_rank < peer);
+    int const tid = pair_tid_block(my_rank, peer, num_ranks, cfg_.block_idx);
+    char const* ip = peers_[peer].ip.c_str();
+
+    int virt_rank = i_listen ? 0 : 1;
+    if (peers_[cfg_.rank].ptr != local_infos_[my_rank].addr) {
+      fprintf(stderr,
+              "Rank %d block %d: Warning: local addr mismatch: got 0x%lx, "
+              "expected 0x%lx\n",
+              my_rank, cfg_.block_idx, local_infos_[my_rank].addr,
+              peers_[cfg_.rank].ptr);
+      std::abort();
+    }
+    exchange_connection_info(virt_rank, ip, tid, &local_infos_[peer],
+                             &remote_infos_[peer]);
+    if (remote_infos_[peer].addr != peers_[peer].ptr) {
+      fprintf(stderr,
+              "Rank %d block %d: Warning: remote addr mismatch for peer %d: "
+              "got 0x%lx, expected 0x%lx\n",
+              my_rank, cfg_.block_idx, peer, remote_infos_[peer].addr,
+              peers_[peer].ptr);
+      std::abort();
+    }
+  }
+
+  // Bring each per-peer QP to RTR/RTS
+  for (int peer = 0; peer < num_ranks; ++peer) {
+    if (peer == my_rank) continue;
+    auto& c = *ctxs_for_all_ranks_[peer];
+
+    // qp is different from each rank.
+    modify_qp_to_rtr(c, &remote_infos_[peer]);
+    modify_qp_to_rts(c, &local_infos_[peer]);
+
+    c.remote_addr = remote_infos_[peer].addr;
+    c.remote_rkey = remote_infos_[peer].rkey;
+
+    printf("Peer %d remote addr=%p rkey=%u\n", peer, (void*)c.remote_addr,
+           c.remote_rkey);
+
+    if (FILE* f = fopen("/tmp/uccl_debug.txt", "a")) {
+      fprintf(
+          f,
+          "[PROXY_INIT] me=%d peer=%d: remote_addr=0x%lx local_buffer=0x%lx\n",
+          my_rank, peer, c.remote_addr, (uintptr_t)cfg_.gpu_buffer);
+      fclose(f);
+    }
+  }
+
+  usleep(50 * 1000);
 }
 
 void Proxy::init_sender() {
   init_common();
-  // sender ACK receive ring (your existing code)
-  local_post_ack_buf(ctx_, kSenderAckQueueDepth);
+  assert(cfg_.rank == 0);
+  auto& ctx_ptr = ctxs_for_all_ranks_[1];
+  local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
 }
 
 void Proxy::init_remote() {
   init_common();
-  // Remote side ensures ack sender resources (legacy globals)
-  remote_reg_ack_buf(ctx_.pd, ring.ack_buf, ring.ack_mr);
-  ring.ack_qp = ctx_.ack_qp;
-  post_receive_buffer_for_imm(ctx_);
+  assert(cfg_.rank == 1);
+  auto& ctx_ptr = ctxs_for_all_ranks_[0];
+  remote_reg_ack_buf(ctx_ptr->pd, ring.ack_buf, ring.ack_mr);
+  ring.ack_qp = ctx_ptr->ack_qp;
+  post_receive_buffer_for_imm(*ctx_ptr);
 }
 
 void Proxy::run_sender() {
   printf("CPU sender thread for block %d started\n", cfg_.block_idx + 1);
   init_sender();
   size_t seen = 0;
+  uint64_t my_tail = 0;
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
     local_poll_completions(ctx_, finished_wrs_, finished_wrs_mutex_,
-                           cfg_.block_idx);
-    notify_gpu_completion(cfg_.rb->tail);
-    post_gpu_command(cfg_.rb->tail, seen);
+                           cfg_.block_idx, qpn2ctx_);
+    notify_gpu_completion(my_tail);
+    post_gpu_command(my_tail, seen);
   }
 }
 
 void Proxy::run_remote() {
   printf("Remote CPU thread for block %d started\n", cfg_.block_idx + 1);
   init_remote();
+  printf("Finished\n");
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
-    remote_poll_completions(ctx_, cfg_.block_idx, ring);
+    remote_poll_completions(ctx_, cfg_.block_idx, ring, qpn2ctx_);
   }
 }
 
 void Proxy::run_dual() {
   printf("Dual (single-thread) proxy for block %d starting\n",
          cfg_.block_idx + 1);
-  init_remote();
-  // == sender-only bits:
-  local_post_ack_buf(ctx_, kSenderAckQueueDepth);
-
+  init_common();
+  for (int peer = 0; peer < (int)ctxs_for_all_ranks_.size(); ++peer) {
+    if (peer == cfg_.rank) continue;
+    auto& ctx_ptr = ctxs_for_all_ranks_[peer];
+    if (!ctx_ptr) continue;
+    local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
+  }
   uint64_t my_tail = 0;
   size_t seen = 0;
+  printf("run_dual initialization complete\n");
   while (ctx_.progress_run.load(std::memory_order_acquire)) {
-    poll_cq_dual(ctx_, finished_wrs_, finished_wrs_mutex_, cfg_.block_idx,
-                 ring);
+    poll_cq_dual(ctx_, finished_wrs_, finished_wrs_mutex_, cfg_.block_idx, ring,
+                 qpn2ctx_);
     notify_gpu_completion(my_tail);
     post_gpu_command(my_tail, seen);
   }
@@ -264,7 +385,7 @@ void Proxy::run_local() {
       }
     }
 
-    const uint64_t idx = my_tail & kQueueMask;
+    uint64_t const idx = my_tail & kQueueMask;
     uint64_t cmd;
     auto last_print = std::chrono::steady_clock::now();
     size_t spin_count = 0;
@@ -344,9 +465,8 @@ void Proxy::post_gpu_commands_mixed(
 
   // Handle regular RDMA writes
   if (!rdma_wrs.empty()) {
-    post_rdma_async_batched(ctx_, cfg_.gpu_buffer, kObjectSize, rdma_wrs.size(),
-                            rdma_wrs, finished_wrs_, finished_wrs_mutex_,
-                            rdma_cmds);
+    post_rdma_async_batched(ctx_, cfg_.gpu_buffer, rdma_wrs.size(), rdma_wrs,
+                            rdma_cmds, ctxs_for_all_ranks_, cfg_.rank);
   }
 
   // Handle atomic operations

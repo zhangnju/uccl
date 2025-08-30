@@ -701,7 +701,14 @@ PYBIND11_MODULE(uccl_ep, m) {
       "register_proxy",
       [](int device_index, py::object proxy) {
         std::lock_guard<std::mutex> lk(g_proxies_mu);
-        uccl::g_proxies_by_dev[device_index].push_back(std::move(proxy));
+        auto& vec = uccl::g_proxies_by_dev[device_index];
+        if (!vec.empty()) {
+          fprintf(stderr,
+                  "WARNING: overwriting existing proxies for device %d\n",
+                  device_index);
+          std::abort();
+        }
+        vec.push_back(std::move(proxy));
       },
       py::arg("device_index"), py::arg("proxy"));
   m.def(
@@ -709,6 +716,12 @@ PYBIND11_MODULE(uccl_ep, m) {
       [](int device_index, std::vector<py::object> proxies) {
         std::lock_guard<std::mutex> lk(g_proxies_mu);
         auto& vec = uccl::g_proxies_by_dev[device_index];
+        if (!vec.empty()) {
+          fprintf(stderr,
+                  "WARNING: overwriting existing proxies for device %d\n",
+                  device_index);
+          std::abort();
+        }
         for (auto& proxy : proxies) {
           vec.push_back(std::move(proxy));
         }

@@ -473,6 +473,12 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
       size_t i = wr_ids[j];
       auto const& cmd = cmds_to_post[i];
       wr_ids[j] = wrs_to_post[i];
+      printf("cmd.req_lptr=%p, buf=%p, i=%zu, cmd.bytes=%zu, "
+            "ctx->remote_addr=%p, S.dispatch_recv_data_offset=%zu, "
+            "cmd.req_rptr=%p\n",
+            (void*)cmd.req_lptr, buf, i, cmd.bytes,
+            (void*)ctx->remote_addr, S.dispatch_recv_data_offset,
+            (void*)cmd.req_rptr);
       sges[j].addr = cmd.req_lptr
                          ? cmd.req_lptr
                          : reinterpret_cast<uintptr_t>(buf) + i * cmd.bytes;

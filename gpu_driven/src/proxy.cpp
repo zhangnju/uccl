@@ -55,6 +55,7 @@ void Proxy::init_common() {
   per_thread_rdma_init(ctx_, cfg_.gpu_buffer, cfg_.total_size, my_rank,
                        cfg_.block_idx);
   pin_thread();
+  if (!ctx_.cq) ctx_.cq = create_per_thread_cq(ctx_);
   if (ctxs_for_all_ranks_.empty()) {
     fprintf(stderr,
             "Error: peers metadata not set before init_common (peers_.size() "
@@ -78,20 +79,6 @@ void Proxy::init_common() {
   printf("[PROXY_INIT] Atomic buffer at %p, size %zu bytes\n",
          ctx_.atomic_old_values_buf, atomic_buf_size);
 
-  // CQ + QP creation
-  ctx_.cq = create_per_thread_cq(ctx_);
-  create_per_thread_qp(ctx_, cfg_.gpu_buffer, cfg_.total_size, &local_info_,
-                       cfg_.rank);
-
-  modify_qp_to_init(ctx_);
-  exchange_connection_info(cfg_.rank, cfg_.peer_ip, cfg_.block_idx,
-                           &local_info_, &remote_info_);
-  modify_qp_to_rtr(ctx_, &remote_info_);
-  modify_qp_to_rts(ctx_, &local_info_);
-
-  ctx_.remote_addr = remote_info_.addr;
-  printf("Remote address: %p, RKey: %u\n", (void*)ctx_.remote_addr,
-         remote_info_.rkey);
   // Add to debug file for core issue tracking
   FILE* debug_file = fopen("/tmp/uccl_debug.txt", "a");
   if (debug_file) {
@@ -309,12 +296,12 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
   cmds_to_post.reserve(batch_size);
 
   for (size_t i = seen; i < cur_head; ++i) {
-    uint64_t cmd;
+    uint64_t cmd = cfg_.rb->volatile_load_cmd(i);
     auto last_print = std::chrono::steady_clock::now();
     size_t spin_count = 0;
     do {
       cmd = cfg_.rb->volatile_load_cmd(i);
-      cpu_relax();  // avoid hammering cacheline
+      cpu_relax();
 
       auto now = std::chrono::steady_clock::now();
       if (now - last_print > std::chrono::seconds(10)) {
@@ -333,7 +320,7 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
       }
     } while (cmd == 0);
 
-    TransferCmd& cmd_entry = cfg_.rb->buf[i];
+    TransferCmd& cmd_entry = cfg_.rb->load_cmd_entry(i);
     wrs_to_post.push_back(i);
     cmds_to_post.push_back(cmd_entry);
     wr_id_to_start_time_[i] = std::chrono::high_resolution_clock::now();
@@ -391,7 +378,7 @@ void Proxy::run_local() {
     size_t spin_count = 0;
     do {
       cmd = cfg_.rb->volatile_load_cmd(idx);
-      cpu_relax();  // avoid hammering cacheline
+      cpu_relax();
 
       auto now = std::chrono::steady_clock::now();
       if (now - last_print > std::chrono::seconds(10)) {
@@ -433,7 +420,7 @@ void Proxy::run_local() {
              cfg_.block_idx + 1, seen, cmd_entry.value);
     }
 
-    cfg_.rb->buf[idx].cmd = 0;
+    cfg_.rb->volatile_store_cmd(idx, 0);
     ++my_tail;
     // cfg_.rb->tail = my_tail;
     cfg_.rb->cpu_volatile_store_tail(my_tail);
@@ -463,6 +450,7 @@ void Proxy::post_gpu_commands_mixed(
     }
   }
 
+  printf("Posting RDMA writes: %zu, %zu\n", rdma_wrs.size(), rdma_cmds.size());
   // Handle regular RDMA writes
   if (!rdma_wrs.empty()) {
     post_rdma_async_batched(ctx_, cfg_.gpu_buffer, rdma_wrs.size(), rdma_wrs,
@@ -471,6 +459,7 @@ void Proxy::post_gpu_commands_mixed(
 
   // Handle atomic operations
   if (!atomic_wrs.empty()) {
+    std::abort();
     post_atomic_operations(atomic_wrs, atomic_cmds);
   }
 }
@@ -478,6 +467,7 @@ void Proxy::post_gpu_commands_mixed(
 void Proxy::post_atomic_operations(
     std::vector<uint64_t> const& wrs_to_post,
     std::vector<TransferCmd> const& cmds_to_post) {
+  // TODO(MaoZiming): use ctxes
   // Use RDMA hardware atomic operations directly on remote GPU memory
 
   if (cmds_to_post.size() > ProxyCtx::kMaxAtomicOps) {
@@ -497,7 +487,7 @@ void Proxy::post_atomic_operations(
     uint64_t mr_start = reinterpret_cast<uintptr_t>(ctx_.mr->addr);
     uint64_t mr_end = mr_start + ctx_.mr->length;
 
-    // TODO:yihan: modify tthe size later. Reserve 16KB at the end for atomic
+    // TODO:yihan: modify the size later. Reserve 16KB at the end for atomic
     // operations (sufficient for all threads, )
     uint64_t atomic_region_start = mr_end - 16384;   // 16KB for atomic ops
     uint64_t thread_offset = cfg_.block_idx * 1024;  // 1KB per thread (reduced)

@@ -488,7 +488,8 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
       wrs[j].sg_list = &sges[j];
       wrs[j].num_sge = 1;
       wrs[j].wr_id = wr_ids[j];
-      wrs[j].wr.rdma.remote_addr = ctx->remote_addr + cmd.req_rptr;
+      wrs[j].wr.rdma.remote_addr =
+          S.remote_addr + S.dispatch_recv_data_offset + cmd.req_rptr;
       wrs[j].wr.rdma.rkey = ctx->remote_rkey;
       wrs[j].opcode = IBV_WR_RDMA_WRITE;
       wrs[j].send_flags = 0;
@@ -531,7 +532,7 @@ void local_process_completions(
   for (int i = 0; i < ne; ++i) {
     if (wc[i].status != IBV_WC_SUCCESS) {
       fprintf(stderr,
-              "here! CQE ERROR wr_id=%llu status=%d(%s) opcode=%d byte_len=%u "
+              "CQE ERROR wr_id=%llu status=%d(%s) opcode=%d byte_len=%u "
               "vendor_err=0x%x qp_num=0x%x\n",
               (unsigned long long)wc[i].wr_id, wc[i].status,
               ibv_wc_status_str(wc[i].status), wc[i].opcode, wc[i].byte_len,
@@ -552,17 +553,29 @@ void local_process_completions(
         if (wc[i].wc_flags & IBV_WC_WITH_IMM) {
           uint64_t slot = static_cast<uint64_t>(wc[i].wr_id);
           uint64_t wr_done = static_cast<uint64_t>(wc[i].imm_data);
-          if (!S.has_received_ack || wr_done >= S.largest_completed_wr) {
-            S.largest_completed_wr = wr_done;
-            S.has_received_ack = true;
-            // printf("Local thread %d received ACK for WR %lu\n", thread_idx,
-            //        wr_done);
+
+          // Check if this is an atomic operation ACK (special WR ID format)
+          bool is_atomic_wr =
+              (wr_done & 0xFFFF000000000000ULL) == 0xa70a000000000000ULL;
+
+          if (is_atomic_wr) {
+            // Handle atomic operation ACK separately - no need to track in
+            // sequence printf("Local thread %d received atomic ACK for WR
+            // %lu\n", thread_idx, wr_done);
           } else {
-            fprintf(stderr,
-                    "Warning: received ACK for WR %lu, but largest completed "
-                    "WR is %lu\n",
-                    wr_done, S.largest_completed_wr);
-            std::abort();
+            // Handle regular operation ACK with sequential tracking
+            if (!S.has_received_ack || wr_done >= S.largest_completed_wr) {
+              S.largest_completed_wr = wr_done;
+              S.has_received_ack = true;
+              // printf("Local thread %d received ACK for WR %lu\n", thread_idx,
+              //        wr_done);
+            } else {
+              fprintf(stderr,
+                      "Warning: received ACK for WR %lu, but largest completed "
+                      "WR is %lu\n",
+                      wr_done, S.largest_completed_wr);
+              std::abort();
+            }
           }
           uint32_t qpn = wc[i].qp_num;
           ProxyCtx& S_ack = *qpn2ctx.at(qpn);
@@ -618,7 +631,7 @@ void remote_process_completions(
     std::unordered_map<uint32_t, ProxyCtx*> const& qpn2ctx) {
   if (ne == 0) return;
 
-  printf("Remote thread %d received %d completions\n", idx, ne);
+  // printf("Remote thread %d received %d completions\n", idx, ne);
   std::unordered_map<uint32_t, std::vector<ibv_recv_wr>> per_qp;
   per_qp.reserve(8);
 
@@ -655,6 +668,7 @@ void remote_process_completions(
         uint32_t imm = ntohl(cqe.imm_data);
         int destination_gpu = static_cast<int>(imm % nDevices);
         size_t src_offset = static_cast<size_t>(S.pool_index) * kObjectSize;
+        // TODO(MaoZiming): Implement the logic to set dst_ptr
         CopyTask task{.wr_id = imm,
                       .dst_dev = destination_gpu,
                       .src_ptr = static_cast<char*>(S.mr->addr) + src_offset,

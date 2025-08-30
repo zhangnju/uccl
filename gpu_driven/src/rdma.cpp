@@ -1,5 +1,6 @@
 #include "rdma.hpp"
 #include "common.hpp"
+#include "peer_copy.cuh"
 #include "peer_copy_worker.hpp"
 #include "rdma_util.hpp"
 #include "util/gpu_rt.h"
@@ -27,6 +28,10 @@
 #include <immintrin.h>
 #endif
 #include "util/util.h"
+
+// Forward declaration of the CUDA function (implemented in peer_copy.cu)
+extern "C" void launch_async_atomic_add(int* gpu_target, int atomic_value,
+                                        cudaStream_t stream);
 #include <stdio.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -145,6 +150,7 @@ void per_thread_rdma_init(ProxyCtx& S, void* gpu_buf, size_t bytes, int rank,
   uint64_t iova = (uintptr_t)gpu_buf;
   S.mr = ibv_reg_mr_iova2(S.pd, gpu_buf, bytes, iova,
                           IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
+                              IBV_ACCESS_REMOTE_ATOMIC |
                               IBV_ACCESS_RELAXED_ORDERING);
 
   if (!S.mr) {
@@ -239,8 +245,8 @@ void modify_qp_to_init(ProxyCtx& S) {
   attr.qp_state = IBV_QPS_INIT;
   attr.port_num = 1;  // HCA port you use
   attr.pkey_index = 0;
-  attr.qp_access_flags =
-      IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+  attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
+                         IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC;
 
   int flags =
       IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
@@ -375,9 +381,11 @@ void modify_qp_to_rts(ProxyCtx& S, RDMAConnectionInfo* local_info) {
   attr.rnr_retry = 7;
   attr.sq_psn = local_info->psn;
   attr.max_rd_atomic = 1;
+  attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC;
 
   int flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
-              IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
+              IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC |
+              IBV_QP_ACCESS_FLAGS;
 
   if (ibv_modify_qp(S.qp, &attr, flags)) {
     perror("Failed to modify QP to RTS");
@@ -441,8 +449,6 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
   }
 
   std::unordered_map<int, std::vector<size_t>> dst_rank_wr_ids;
-  std::vector<size_t> local_idxs;
-
   for (size_t i = 0; i < num_wrs; ++i) {
     if (cmds_to_post[i].dst_rank == static_cast<uint32_t>(my_rank)) {
       // NOTE(MaoZiming): this should not happen.
@@ -467,6 +473,12 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
       size_t i = wr_ids[j];
       auto const& cmd = cmds_to_post[i];
       wr_ids[j] = wrs_to_post[i];
+      // printf("cmd.req_lptr=%p, buf=%p, i=%zu, cmd.bytes=%zu, "
+      //       "ctx->remote_addr=%p, S.dispatch_recv_data_offset=%zu, "
+      //       "cmd.req_rptr=%p\n",
+      //       (void*)cmd.req_lptr, buf, i, cmd.bytes,
+      //       (void*)ctx->remote_addr, S.dispatch_recv_data_offset,
+      //       (void*)cmd.req_rptr);
       sges[j].addr = cmd.req_lptr
                          ? cmd.req_lptr
                          : reinterpret_cast<uintptr_t>(buf) + i * cmd.bytes;

@@ -483,7 +483,7 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
       wrs[j].num_sge = 1;
       wrs[j].wr_id = wr_ids[j];
       wrs[j].wr.rdma.remote_addr =
-          S.remote_addr + S.dispatch_recv_data_offset + cmd.req_rptr;
+          ctx->remote_addr + S.dispatch_recv_data_offset + cmd.req_rptr;
       wrs[j].wr.rdma.rkey = ctx->remote_rkey;
       wrs[j].opcode = IBV_WR_RDMA_WRITE;
       wrs[j].send_flags = 0;
@@ -625,7 +625,7 @@ void remote_process_completions(
     std::unordered_map<uint32_t, ProxyCtx*> const& qpn2ctx) {
   if (ne == 0) return;
 
-  printf("Remote thread %d received %d completions\n", idx, ne);
+  // printf("Remote thread %d received %d completions\n", idx, ne);
   std::unordered_map<uint32_t, std::vector<ibv_recv_wr>> per_qp;
   per_qp.reserve(8);
 

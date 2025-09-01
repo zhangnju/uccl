@@ -76,7 +76,7 @@ Endpoint::Endpoint(uint32_t const local_gpu_idx, uint32_t const num_cpus)
       gpu_to_dev[i] = -1;
     }
   }
-  if gpu_to_dev[local_gpu_idx_] == -1 {
+  if (gpu_to_dev[local_gpu_idx_] == -1) {
     throw std::runtime_error("Failed to get best dev idx for GPU " +
                              std::to_string(local_gpu_idx_));
   }

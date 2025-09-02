@@ -69,17 +69,10 @@ Endpoint::Endpoint(uint32_t const local_gpu_idx, uint32_t const num_cpus)
   // Initialize the RDMA endpoint with lazy creation.
   ep_ = new uccl::RDMAEndpoint(num_cpus_);
 
-  for (int i = 0; i < kMaxNumGPUs; i++) {
-    try {
-      gpu_to_dev[i] = ep_->get_best_dev_idx(i);
-    } catch (const std::exception& e) {
-      gpu_to_dev[i] = -1;
-    }
+  for (int i = 0; i < ep_->get_num_devices(); i++) {
+    gpu_to_dev[i] = ep_->get_best_dev_idx(i);
   }
-  if (gpu_to_dev[local_gpu_idx_] == -1) {
-    throw std::runtime_error("Failed to get best dev idx for GPU " +
-                             std::to_string(local_gpu_idx_));
-  }
+
   numa_node_ =
       uccl::RDMAFactory::get_factory_dev(gpu_to_dev[local_gpu_idx_])->numa_node;
 

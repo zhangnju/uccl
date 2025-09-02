@@ -17,6 +17,7 @@ import torch.distributed as dist
 import time
 from buffer import Buffer
 import os
+import sys
 
 # import deep_ep as ep
 try:
@@ -118,6 +119,7 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
             allow_mnnvl=False,
             explicitly_destroy=True,
         )
+        buffer.connect_atomic_buffer(proxies[0])
 
         if rank == 0:
             print("[simple-test] ✓ Buffer created successfully", flush=True)
@@ -126,6 +128,7 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
             proxy.calculate_and_set_dispatch_recv_data_offset(
                 num_tokens, hidden, num_experts
             )
+            proxy.set_atomic_buffer_ptr(proxies[0].get_atomic_buffer_ptr())
 
         if rank == 0:
             print(
@@ -136,7 +139,7 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
         cumulative_local_expert_recv_stats = torch.zeros(
             (num_experts // num_ranks,), dtype=torch.int, device="cuda"
         )
-        recv_x, recv_count, handle, event, hook = buffer.low_latency_dispatch(
+        recv_x, recv_count, handle, event, dispatch_hook = buffer.low_latency_dispatch(
             x=x,
             topk_idx=topk_idx,
             num_max_dispatch_tokens_per_rank=num_tokens,
@@ -148,11 +151,10 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
             async_finish=False,
             return_recv_hook=True,
         )
-        hook()
+        dispatch_hook()
 
-        if rank == 0:
-            print("[simple-test] ✓ Low-latency dispatch completed", flush=True)
-            print(f"[simple-test] Received tensor shape: {recv_x.shape}", flush=True)
+        print("[simple-test] ✓ Low-latency dispatch completed", flush=True)
+        print(f"[simple-test] Received tensor shape: {recv_x.shape}", flush=True)
 
         topk_weights = torch.ones(
             (num_tokens, num_topk), dtype=torch.float32, device="cuda"
@@ -169,15 +171,11 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
         )
         combine_hook()
 
-        if rank == 0:
-            print("[simple-test] ✓ Low-latency combine completed", flush=True)
-            print(
-                f"[simple-test] Combined tensor shape: {combined_x.shape}", flush=True
-            )
-            print("[simple-test] ✓ All tests passed!", flush=True)
+        print("[simple-test] ✓ Low-latency combine completed", flush=True)
+        print(f"[simple-test] Combined tensor shape: {combined_x.shape}", flush=True)
+        print("[simple-test] ✓ All tests passed!", flush=True)
 
         time.sleep(10)
-
         print("[simple-test] ✓ before destroy!", flush=True)
 
         try:
@@ -199,13 +197,12 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
         except Exception:
             pass
 
-        if rank == 0:
-            print("[simple-test] ✓ Proxy stopped", flush=True)
-            try:
-                ep.unregister_proxy(device_index)
-            except Exception:
-                pass
-            print("[simple-test] ✓ Command ring freed", flush=True)
+        print("[simple-test] ✓ Proxy stopped", flush=True)
+        try:
+            ep.unregister_proxy(device_index)
+        except Exception:
+            pass
+        print("[simple-test] ✓ Proxy unregistered", flush=True)
 
         dist.barrier()
 

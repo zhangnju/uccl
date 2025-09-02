@@ -6,6 +6,7 @@
 #include "ep_runtime.cuh"
 #include "ep_util.hpp"
 #include "internode_ll.cuh"
+#include "uccl_proxy.hpp"
 #include <ATen/cuda/CUDAContext.h>
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
@@ -300,7 +301,7 @@ class Buffer {
     // Buffer control
     // TODO(MaoZiming)
     LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank,
-                            hidden, num_ranks, num_experts);
+                            hidden, num_ranks, num_experts, atomic_buffer_ptr);
     EP_HOST_ASSERT(layout.total_bytes <=
                    static_cast<std::size_t>(num_rdma_bytes));
     auto buffer = layout.buffers[low_latency_buffer_idx];
@@ -375,8 +376,8 @@ class Buffer {
           num_max_dispatch_tokens_per_rank, num_topk, num_experts, rank,
           num_ranks, use_fp8, round_scale, use_ue8m0, workspace, num_device_sms,
           launch_stream, phases, d_ring_addrs, num_ring_addrs,
-          get_num_max_nvl_peers(),
-          d_ipc_base_ptrs);  // Added IPC base pointers
+          get_num_max_nvl_peers(), d_ipc_base_ptrs,
+          atomic_buffer_ptr);  // Added IPC base pointers
     };
     launcher(return_recv_hook
                  ? LOW_LATENCY_SEND_PHASE
@@ -456,7 +457,7 @@ class Buffer {
     // Buffer control
     // TODO(MaoZiming)
     LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank,
-                            hidden, num_ranks, num_experts);
+                            hidden, num_ranks, num_experts, atomic_buffer_ptr);
     EP_HOST_ASSERT(layout.total_bytes <=
                    static_cast<std::size_t>(num_rdma_bytes));
     auto buffer = layout.buffers[low_latency_buffer_idx];
@@ -497,8 +498,8 @@ class Buffer {
           hidden, num_max_dispatch_tokens_per_rank, num_topk, num_experts, rank,
           num_ranks, use_logfmt, workspace, num_device_sms, launch_stream,
           phases, zero_copy, d_ring_addrs, num_ring_addrs,
-          get_num_max_nvl_peers(), d_ipc_base_ptrs,
-          rdma_buffer_ptr);  // Added IPC base pointers
+          get_num_max_nvl_peers(), d_ipc_base_ptrs, rdma_buffer_ptr,
+          atomic_buffer_ptr);  // Added IPC base pointers
     };
     launcher(return_recv_hook
                  ? LOW_LATENCY_SEND_PHASE
@@ -650,6 +651,14 @@ class Buffer {
     rdma_buffer_ptr = ptr;
   }
 
+  void set_atomic_buffer_ptr(void* ptr) {
+    if (ptr == nullptr) {
+      throw std::invalid_argument("set_atomic_buffer_ptr: ptr null");
+    }
+    printf("Buffer atomic_buffer_ptr=%p\n", ptr);
+    atomic_buffer_ptr = ptr;
+  }
+
   bool is_available() const { return available; }
 
  private:
@@ -663,6 +672,7 @@ class Buffer {
   std::vector<py::object> proxies_;
   bool available{false};
   void* rdma_buffer_ptr = nullptr;
+  void* atomic_buffer_ptr = nullptr;
   int low_latency_buffer_idx = 0;
   void* workspace = nullptr;
 
@@ -762,6 +772,10 @@ PYBIND11_MODULE(uccl_ep, m) {
   py::class_<EventHandle>(m, "EventHandle")
       .def(py::init<>())
       .def("current_stream_wait", &EventHandle::current_stream_wait);
+
+  m.def("connect_atomic_buffer", [](UcclProxy& p, Buffer& b) {
+    b.set_atomic_buffer_ptr(p.get_atomic_buffer_ptr());
+  });
 
   py::class_<EventOverlap>(m, "EventOverlap").def(py::init<>());
   py::class_<Buffer>(m, "Buffer")

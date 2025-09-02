@@ -219,6 +219,9 @@ void Proxy::run_dual() {
     auto& ctx_ptr = ctxs_for_all_ranks_[peer];
     if (!ctx_ptr) continue;
     local_post_ack_buf(*ctx_ptr, kSenderAckQueueDepth);
+    remote_reg_ack_buf(ctx_ptr->pd, ring.ack_buf, ring.ack_mr);
+    ring.ack_qp = ctx_ptr->ack_qp;
+    post_receive_buffer_for_imm(*ctx_ptr);
   }
   uint64_t my_tail = 0;
   size_t seen = 0;
@@ -296,40 +299,14 @@ void Proxy::post_gpu_command(uint64_t& my_tail, size_t& seen) {
 
   for (size_t i = seen; i < cur_head; ++i) {
     uint64_t cmd = cfg_.rb->volatile_load_cmd(i);
-    auto last_print = std::chrono::steady_clock::now();
-    size_t spin_count = 0;
-    do {
-      cmd = cfg_.rb->volatile_load_cmd(i);
-      cpu_relax();
-
-      auto now = std::chrono::steady_clock::now();
-      if (now - last_print > std::chrono::seconds(10)) {
-        printf(
-            "Still waiting at block %d, seen=%ld, spin_count=%zu, my_tail=%lu, "
-            "cmd: %lu\n",
-            cfg_.block_idx + 1, seen, spin_count, my_tail, cmd);
-        last_print = now;
-        spin_count++;
-      }
-
-      if (!ctx_.progress_run.load(std::memory_order_acquire)) {
-        printf("Local block %d stopping early at seen=%ld\n",
-               cfg_.block_idx + 1, seen);
-        return;
-      }
-    } while (cmd == 0);
+    // NOTE(MaoZiming): Non-blocking. prevent local and remote both while loop.
+    if (cmd == 0) break;
 
     TransferCmd& cmd_entry = cfg_.rb->load_cmd_entry(i);
     wrs_to_post.push_back(i);
     cmds_to_post.push_back(cmd_entry);
     wr_id_to_start_time_[i] = std::chrono::high_resolution_clock::now();
-  }
-  seen = cur_head;
-
-  if (wrs_to_post.size() != batch_size) {
-    fprintf(stderr, "Error: wrs_to_post size %zu != batch_size %zu\n",
-            wrs_to_post.size(), batch_size);
-    std::abort();
+    seen = i + 1;
   }
   if (!wrs_to_post.empty()) {
     auto start = std::chrono::high_resolution_clock::now();
@@ -477,6 +454,7 @@ void Proxy::post_atomic_operations(std::vector<uint64_t> const& wrs_to_post,
   for (size_t i = 0; i < wrs_to_post.size(); ++i) {
     if (cmds_to_post[i].dst_rank == static_cast<uint32_t>(my_rank)) {
       // NOTE(MaoZiming): this should not happen.
+      std::abort();
       continue;
     } else {
       dst_rank_wr_ids[cmds_to_post[i].dst_rank].push_back(i);
@@ -527,7 +505,7 @@ void Proxy::post_atomic_operations(std::vector<uint64_t> const& wrs_to_post,
       }
 
       std::memset(&wrs[i], 0, sizeof(wrs[i]));
-      wrs[i].wr_id = wrs_to_post[i];
+      wrs[i].wr_id = kAtomicWrTag;
       wrs[i].sg_list = &sges[i];
       wrs[i].num_sge = 1;
 
@@ -551,8 +529,10 @@ void Proxy::post_atomic_operations(std::vector<uint64_t> const& wrs_to_post,
       uint64_t remote_mr_end = ctx->remote_addr + ctx->mr->length;
       if (target_addr < ctx->remote_addr ||
           target_addr + sizeof(uint64_t) > remote_mr_end) {
-        printf("[ERROR] Atomic target 0x%lx outside MR bounds - ABORTING\n",
-               target_addr);
+        printf(
+            "[ERROR] Atomic target 0x%lx outside MR bounds [0x%lx - 0x%lx] - "
+            "ABORTING\n",
+            target_addr, ctx->remote_addr, remote_mr_end);
         std::abort();
       }
 

@@ -719,6 +719,7 @@ void local_process_completions(ProxyCtx& S,
                                std::vector<ProxyCtx*>& ctx_by_tag) {
   if (ne == 0) return;
   int send_completed = 0;
+  // printf("Local thread %d received %d completions\n", thread_idx, ne);
 
   for (int i = 0; i < ne; ++i) {
     if (wc[i].status != IBV_WC_SUCCESS) {
@@ -745,26 +746,13 @@ void local_process_completions(ProxyCtx& S,
         if (wc[i].wc_flags & IBV_WC_WITH_IMM) {
           const uint32_t slot = wr_slot(wc[i].wr_id);
           uint64_t wr_done = static_cast<uint64_t>(ntohl(wc[i].imm_data));
-
-          // Check if this is an atomic operation ACK (special WR ID format)
-          bool is_atomic_wr =
-              (wr_done & 0xFFFF000000000000ULL) == 0xa70a000000000000ULL;
-
-          if (is_atomic_wr) {
-            // Handle atomic operation ACK separately - no need to track in
-            // sequence
-            printf("Local thread %d received atomic ACK for WR %lu\n",
-                   thread_idx, wr_done);
+          // Handle regular operation ACK with sequential tracking
+          if (!S.has_received_ack || wr_done >= S.largest_completed_wr) {
+            S.largest_completed_wr = wr_done;
+            S.has_received_ack = true;
           } else {
-            // Handle regular operation ACK with sequential tracking
-            if (!S.has_received_ack || wr_done >= S.largest_completed_wr) {
-              S.largest_completed_wr = wr_done;
-              S.has_received_ack = true;
-            } else {
-              S.largest_completed_wr =
-                  std::max(S.largest_completed_wr, wr_done);
-              S.has_received_ack = true;
-            }
+            S.largest_completed_wr = std::max(S.largest_completed_wr, wr_done);
+            S.has_received_ack = true;
           }
           const uint32_t tag = wr_tag(wc[i].wr_id);
           ProxyCtx& S_ack = *ctx_by_tag[tag];
@@ -786,7 +774,13 @@ void local_process_completions(ProxyCtx& S,
           std::abort();
         }
         break;
-
+      case IBV_WC_FETCH_ADD: {
+        uint64_t wrid = wc[i].wr_id;
+        // If you encode a tag, check it here (see fix #3 below)
+        printf("Local thread %d: atomic completed (wr_id=0x%lx)\n", thread_idx,
+               wrid);
+        send_completed++;
+      } break;
       default:
         break;
     }

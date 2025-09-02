@@ -178,7 +178,7 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
 
         time.sleep(10)
 
-        print("[simple-test] ✓ before destory!", flush=True)
+        print("[simple-test] ✓ before destroy!", flush=True)
 
         try:
             buffer.destroy()

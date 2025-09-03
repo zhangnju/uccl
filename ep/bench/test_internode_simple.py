@@ -19,7 +19,14 @@ from buffer import Buffer
 import os
 import sys
 
-from utils import init_dist, get_peer_ip, detect_ib_hca, get_cpu_proxies_meta, initialize_uccl, destroy_uccl
+from utils import (
+    init_dist,
+    get_peer_ip,
+    detect_ib_hca,
+    get_cpu_proxies_meta,
+    initialize_uccl,
+    destroy_uccl,
+)
 
 
 def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
@@ -118,24 +125,24 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
         time.sleep(1)
         print("[simple-test] ✓ before destroy!", flush=True)
 
-        try:
-            buffer.destroy()
-        except Exception:
-            pass
-        dist.barrier()
-        print("[simple-test] ✓ Buffer destroyed", flush=True)
-
-        destroy_uccl(proxies, workers)
-        dist.barrier()
-
     except Exception as e:
         if rank == 0:
             import traceback
 
             print(f"[simple-test] ✗ Error: {repr(e)}", flush=True)
             traceback.print_exc()
-
         raise
+
+    try:
+        buffer.destroy()
+    except Exception:
+        pass
+
+    dist.barrier()
+    print("[simple-test] ✓ Buffer destroyed", flush=True)
+
+    destroy_uccl(proxies, workers)
+    dist.barrier()
 
 
 def test_worker(local_rank: int, num_local_ranks: int):

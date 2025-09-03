@@ -836,7 +836,7 @@ PYBIND11_MODULE(ep, m) {
                                std::string(cudaGetErrorString(st)));
     }
   });
-
+  m.def("get_low_latency_rdma_size_hint", &get_low_latency_rdma_size_hint);
   m.def("sync_stream", []() {
     auto st = cudaDeviceSynchronize();
     if (st != cudaSuccess)

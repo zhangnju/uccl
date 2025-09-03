@@ -32,6 +32,8 @@ from utils import (
     hash_tensor,
     per_token_cast_back,
     get_cpu_proxies_meta,
+    initialize_uccl,
+    destroy_uccl,
     get_peer_ip,
 )
 
@@ -59,53 +61,6 @@ def test_main(
 ):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
-
-    # UCCL new code for initialization
-    bench = ep.Bench()
-    proxies = []
-    scratch_nbytes = int(1e9)  # 256 MB
-    scratch = torch.empty(
-        scratch_nbytes, dtype=torch.uint8, device=f"cuda:{device_index}"
-    )
-    scratch_ptr = scratch.data_ptr()
-
-    rank2meta = get_cpu_proxies_meta(
-        rank, scratch_ptr, scratch_nbytes, num_ranks, group
-    )
-    peers_meta_list = [rank2meta[r] for r in range(num_ranks)]
-    device_index = int(os.environ["LOCAL_RANK"])
-    peer_ip = get_peer_ip(rank, num_ranks, group)
-
-    for i in range(bench.num_proxies()):
-        proxy = ep.Proxy(
-            rb_addr=bench.ring_addr(i),
-            block_idx=i,
-            gpu_buffer_addr=scratch_ptr,
-            total_size=scratch_nbytes,
-            rank=rank,
-            peer_ip=peer_ip,
-        )
-        proxy.set_peers_meta(peers_meta_list)
-        proxies.append(proxy)
-    ep.register_proxies(device_index, proxies)
-
-    dist.barrier(group)
-    for i in range(bench.num_proxies()):
-        proxies[i].start_dual()
-
-    workers = None
-    if hasattr(ep, "PeerCopyManager"):
-        try:
-            workers = ep.PeerCopyManager(src_device=device_index)
-            workers.start_for_proxies(proxies)
-            if rank == 0:
-                print("[simple-test] ✓ PeerCopyManager started", flush=True)
-        except Exception as e:
-            if rank == 0:
-                print(f"[simple-test] PeerCopyManager unavailable: {e}", flush=True)
-
-    time.sleep(1)
-    # UCCL new code for initialization.
 
     assert num_experts % num_ranks == 0
     num_local_experts = num_experts // num_ranks
@@ -391,6 +346,14 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
 
+    # UCCL new code for initialization
+    device_index = int(os.environ["LOCAL_RANK"])
+    scratch_nbytes = int(1e9)  # 256 MB
+    scratch = torch.empty(
+        scratch_nbytes, dtype=torch.uint8, device=f"cuda:{device_index}"
+    )
+    proxies, workers = initialize_uccl(scratch, scratch_nbytes, rank, num_ranks, group)
+
     num_rdma_bytes = Buffer.get_low_latency_rdma_size_hint(
         num_tokens, hidden, num_ranks, num_experts
     )
@@ -398,6 +361,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"Allocating buffer size: {num_rdma_bytes / 1e6} MB ...", flush=True)
     buffer = Buffer(
         group,
+        rdma_buffer_ptr=scratch.data_ptr(),
         num_rdma_bytes=num_rdma_bytes,
         low_latency_mode=True,
         num_qps_per_rank=num_experts // num_ranks,
@@ -453,6 +417,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # Destroy the buffer runtime and communication group
     buffer.destroy()
+    dist.barrier()
+    destroy_uccl(proxies, workers)
     dist.barrier()
     dist.destroy_process_group()
 

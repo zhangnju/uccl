@@ -11,6 +11,7 @@ import tempfile
 import json
 from pathlib import Path
 import time
+import numpy as np
 
 # import deep_ep as ep
 try:
@@ -281,6 +282,36 @@ class suppress_stdout_stderr:
 
         self.outnull_file.close()
         self.errnull_file.close()
+
+
+def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
+    # Flush L2 cache with 256 MB data
+    torch.cuda.synchronize()
+    cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+
+    # Warmup
+    for _ in range(num_warmups):
+        fn()
+
+    # Flush L2
+    cache.zero_()
+
+    # Testing
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_tests)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_tests)]
+    for i in range(num_tests):
+        # Record
+        start_events[i].record()
+        fn()
+        end_events[i].record()
+        if post_fn is not None:
+            post_fn()
+    torch.cuda.synchronize()
+
+    times = np.array(
+        [s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events)]
+    )[1:]
+    return np.average(times), np.min(times), np.max(times)
 
 
 def bench_kineto(

@@ -3,12 +3,12 @@ Simple internode test for DeepEP low-latency kernels.
 This test avoids the IPC handle issues by focusing only on low-latency functionality.
 On first node:
 torchrun --nnodes=2 --nproc_per_node=1 --node_rank=0 \
-  --master_addr=10.141.1.1 --master_port=12356 \
+  --master_addr=10.1.209.224 --master_port=12356 \
   bench/test_internode_simple.py
 
 On second node:
 torchrun --nnodes=2 --nproc_per_node=1 --node_rank=1 \
-  --master_addr=10.141.1.1 --master_port=12356 \
+  --master_addr=10.1.209.224 --master_port=12356 \
   bench/test_internode_simple.py
 """
 
@@ -19,17 +19,14 @@ from buffer import Buffer
 import os
 import sys
 
-# import deep_ep as ep
-try:
-    from uccl import ep
-except ImportError as exc:
-    import sys
-
-    sys.stderr.write("Failed to import uccl.ep\n")
-    raise
-
-
-from utils import init_dist, get_peer_ip, detect_ib_hca, get_cpu_proxies_meta
+from utils import (
+    init_dist,
+    get_peer_ip,
+    detect_ib_hca,
+    get_cpu_proxies_meta,
+    initialize_uccl,
+    destroy_uccl,
+)
 
 
 def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
@@ -40,17 +37,6 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
     device_index = int(os.environ["LOCAL_RANK"])
     print(f"[simple-test] Running on device {device_index}", flush=True)
 
-    peer_ip = get_peer_ip(rank, num_ranks, group)
-
-    if rank == 0:
-        print(
-            f"[simple-test] Testing with {num_tokens} tokens, {hidden} hidden, {num_experts} experts, peer IP: {peer_ip}",
-            flush=True,
-        )
-        print(
-            f"[simple-test] Running on {num_ranks} ranks across {num_ranks} nodes, peer_ip: {peer_ip}",
-            flush=True,
-        )
     torch.manual_seed(rank)
     x = torch.randn(
         (num_tokens, hidden), dtype=torch.bfloat16, device=f"cuda:{device_index}"
@@ -62,54 +48,16 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
         device_index
     ).multi_processor_count
 
-    bench = ep.Bench()
-    # x_ptr = x.data_ptr()
-    proxies = []
-
     scratch_nbytes = int(1e9)  # 256 MB
     scratch = torch.empty(
         scratch_nbytes, dtype=torch.uint8, device=f"cuda:{device_index}"
     )
-    scratch_ptr = scratch.data_ptr()
-    scratch_bytes = scratch.numel() * scratch.element_size()
-
-    rank2meta = get_cpu_proxies_meta(rank, scratch_ptr, scratch_bytes, num_ranks, group)
-    peers_meta_list = [rank2meta[r] for r in range(num_ranks)]
-
-    for i in range(bench.num_proxies()):
-        proxy = ep.Proxy(
-            rb_addr=bench.ring_addr(i),
-            block_idx=i,
-            gpu_buffer_addr=scratch_ptr,
-            total_size=scratch_bytes,
-            rank=rank,
-            peer_ip=peer_ip,
-        )
-        proxy.set_peers_meta(peers_meta_list)
-        proxies.append(proxy)
-    ep.register_proxies(device_index, proxies)
-
-    dist.barrier(group)
-    for i in range(bench.num_proxies()):
-        proxies[i].start_dual()
-
-    workers = None
-    if hasattr(ep, "PeerCopyManager"):
-        try:
-            workers = ep.PeerCopyManager(src_device=device_index)
-            workers.start_for_proxies(proxies)
-            if rank == 0:
-                print("[simple-test] ✓ PeerCopyManager started", flush=True)
-        except Exception as e:
-            if rank == 0:
-                print(f"[simple-test] PeerCopyManager unavailable: {e}", flush=True)
-
-    time.sleep(1)
+    proxies, workers = initialize_uccl(scratch, scratch_nbytes, rank, num_ranks, group)
 
     try:
         buffer = Buffer(
             group=group,
-            rdma_buffer_ptr=scratch_ptr,
+            rdma_buffer_ptr=scratch.data_ptr(),
             num_nvl_bytes=0,
             num_rdma_bytes=int(scratch_nbytes),
             low_latency_mode=True,
@@ -177,42 +125,24 @@ def test_simple_internode(rank: int, num_ranks: int, group: dist.ProcessGroup):
         time.sleep(1)
         print("[simple-test] ✓ before destroy!", flush=True)
 
-        try:
-            buffer.destroy()
-        except Exception:
-            pass
-        dist.barrier()
-        print("[simple-test] ✓ Buffer destroyed", flush=True)
-
-        if workers is not None:
-            try:
-                workers.stop()
-            except Exception:
-                pass
-
-        try:
-            for p in proxies:
-                p.stop()
-        except Exception:
-            pass
-
-        print("[simple-test] ✓ Proxy stopped", flush=True)
-        try:
-            ep.unregister_proxy(device_index)
-        except Exception:
-            pass
-        print("[simple-test] ✓ Proxy unregistered", flush=True)
-
-        dist.barrier()
-
     except Exception as e:
         if rank == 0:
             import traceback
 
             print(f"[simple-test] ✗ Error: {repr(e)}", flush=True)
             traceback.print_exc()
-
         raise
+
+    try:
+        buffer.destroy()
+    except Exception:
+        pass
+
+    dist.barrier()
+    print("[simple-test] ✓ Buffer destroyed", flush=True)
+
+    destroy_uccl(proxies, workers)
+    dist.barrier()
 
 
 def test_worker(local_rank: int, num_local_ranks: int):

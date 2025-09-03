@@ -1,12 +1,25 @@
 import inspect
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Union
 import os
 import torch
 import torch.distributed as dist
 from typing import Optional
 import glob
-
+import sys
 from uccl.ep import EventHandle
+import tempfile
+import json
+from pathlib import Path
+import time
+
+# import deep_ep as ep
+try:
+    from uccl import ep
+except ImportError as exc:
+    import sys
+
+    sys.stderr.write("Failed to import uccl.ep\n")
+    raise
 
 
 def init_dist(local_rank: int, num_local_ranks: int):
@@ -207,3 +220,215 @@ def detect_ib_hca():
     if not ib_devs:
         return None
     return ib_devs[0]
+
+
+def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
+    if x_scales.dtype == torch.int:
+        x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+        x_scales = x_scales.view(dtype=torch.float)
+    x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, 128)
+    x_scales = x_scales.view(x_fp8.size(0), -1, 1)
+    return (x_fp32 * x_scales).view(x_fp8.shape).to(torch.bfloat16)
+
+
+class empty_suppress:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+
+class suppress_stdout_stderr:
+    def __enter__(self):
+        self.outnull_file = open(os.devnull, "w")
+        self.errnull_file = open(os.devnull, "w")
+
+        self.old_stdout_fileno_undup = sys.stdout.fileno()
+        self.old_stderr_fileno_undup = sys.stderr.fileno()
+
+        self.old_stdout_fileno = os.dup(sys.stdout.fileno())
+        self.old_stderr_fileno = os.dup(sys.stderr.fileno())
+
+        self.old_stdout = sys.stdout
+        self.old_stderr = sys.stderr
+
+        os.dup2(self.outnull_file.fileno(), self.old_stdout_fileno_undup)
+        os.dup2(self.errnull_file.fileno(), self.old_stderr_fileno_undup)
+
+        sys.stdout = self.outnull_file
+        sys.stderr = self.errnull_file
+        return self
+
+    def __exit__(self, *_):
+        sys.stdout = self.old_stdout
+        sys.stderr = self.old_stderr
+
+        os.dup2(self.old_stdout_fileno, self.old_stdout_fileno_undup)
+        os.dup2(self.old_stderr_fileno, self.old_stderr_fileno_undup)
+
+        os.close(self.old_stdout_fileno)
+        os.close(self.old_stderr_fileno)
+
+        self.outnull_file.close()
+        self.errnull_file.close()
+
+
+def bench_kineto(
+    fn,
+    kernel_names: Union[str, tuple],
+    num_tests: int = 30,
+    suppress_kineto_output: bool = False,
+    trace_path: Optional[str] = None,
+    barrier_comm_profiling: bool = False,
+    num_kernels_per_period: int = 1,
+):
+    # Profile
+    suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
+    with suppress():
+        schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule
+        ) as prof:
+            for i in range(2):
+                # NOTES: use a large kernel and a barrier to eliminate the unbalanced CPU launch overhead
+                if barrier_comm_profiling:
+                    lhs = torch.randn((8192, 8192), dtype=torch.float, device="cuda")
+                    rhs = torch.randn((8192, 8192), dtype=torch.float, device="cuda")
+                    lhs @ rhs
+                    dist.all_reduce(torch.ones(1, dtype=torch.float, device="cuda"))
+                for _ in range(num_tests):
+                    fn()
+                prof.step()
+
+    # Parse the profiling table
+    assert isinstance(kernel_names, str) or isinstance(kernel_names, tuple)
+    is_tuple = isinstance(kernel_names, tuple)
+    prof_lines = (
+        prof.key_averages()
+        .table(sort_by="cuda_time_total", max_name_column_width=100)
+        .split("\n")
+    )
+    kernel_names = (kernel_names,) if isinstance(kernel_names, str) else kernel_names
+    assert all([isinstance(name, str) for name in kernel_names])
+    for name in kernel_names:
+        assert (
+            sum([name in line for line in prof_lines]) == 1
+        ), f"Errors of the kernel {name} in the profiling table"
+
+    # Save chrome traces
+    if trace_path is not None:
+        prof.export_chrome_trace(trace_path)
+
+    # Return average kernel durations
+    units = {"ms": 1e3, "us": 1e6}
+    kernel_durations = []
+    for name in kernel_names:
+        for line in prof_lines:
+            if name in line:
+                time_str = line.split()[-2]
+                for unit, scale in units.items():
+                    if unit in time_str:
+                        kernel_durations.append(
+                            float(time_str.replace(unit, "")) / scale
+                        )
+                        break
+                break
+
+    # Expand the kernels by periods
+    if num_kernels_per_period > 1:
+        with tempfile.NamedTemporaryFile(suffix=".json") as tmp:
+            prof.export_chrome_trace(tmp.name)
+            profile_data = json.loads(Path(tmp.name).read_text())
+
+        for i, kernel_name in enumerate(kernel_names):
+            events = [
+                event
+                for event in profile_data["traceEvents"]
+                if f"::{kernel_name}" in event["name"]
+            ]
+            events = sorted(events, key=lambda event: event["ts"])
+            durations = [event["dur"] / 1e6 for event in events]
+            assert len(durations) % num_kernels_per_period == 0
+            num_kernel_patterns = len(durations) // num_kernels_per_period
+            kernel_durations[i] = [
+                sum(durations[j::num_kernels_per_period]) / num_kernel_patterns
+                for j in range(num_kernels_per_period)
+            ]
+
+    # Return execution durations
+    return kernel_durations if is_tuple else kernel_durations[0]
+
+
+def initialize_uccl(scratch, scratch_nbytes, rank, num_ranks, group):
+
+    device_index = int(os.environ["LOCAL_RANK"])
+    peer_ip = get_peer_ip(rank, num_ranks, group)
+    if rank == 0:
+        print(
+            f"Peer IP: {peer_ip}",
+            flush=True,
+        )
+
+    bench = ep.Bench()
+    proxies = []
+    scratch_ptr = scratch.data_ptr()
+    rank2meta = get_cpu_proxies_meta(
+        rank, scratch_ptr, scratch_nbytes, num_ranks, group
+    )
+    peers_meta_list = [rank2meta[r] for r in range(num_ranks)]
+
+    for i in range(bench.num_proxies()):
+        proxy = ep.Proxy(
+            rb_addr=bench.ring_addr(i),
+            block_idx=i,
+            gpu_buffer_addr=scratch_ptr,
+            total_size=scratch_nbytes,
+            rank=rank,
+            peer_ip=peer_ip,
+        )
+        proxy.set_peers_meta(peers_meta_list)
+        proxies.append(proxy)
+    ep.register_proxies(device_index, proxies)
+
+    dist.barrier(group)
+    for i in range(bench.num_proxies()):
+        proxies[i].start_dual()
+
+    workers = None
+    if hasattr(ep, "PeerCopyManager"):
+        try:
+            workers = ep.PeerCopyManager(src_device=device_index)
+            workers.start_for_proxies(proxies)
+            if rank == 0:
+                print("[simple-test] ✓ PeerCopyManager started", flush=True)
+        except Exception as e:
+            if rank == 0:
+                print(f"[simple-test] PeerCopyManager unavailable: {e}", flush=True)
+
+    time.sleep(1)
+
+    return proxies, workers
+
+
+def destroy_uccl(proxies, workers):
+
+    device_index = int(os.environ["LOCAL_RANK"])
+    if workers is not None:
+        try:
+            workers.stop()
+        except Exception:
+            pass
+
+    try:
+        for p in proxies:
+            p.stop()
+    except Exception:
+        pass
+
+    print("[simple-test] ✓ Proxy stopped", flush=True)
+    try:
+        ep.unregister_proxy(device_index)
+    except Exception:
+        pass
+    print("[simple-test] ✓ Proxy unregistered", flush=True)

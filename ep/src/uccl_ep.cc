@@ -85,9 +85,9 @@ class Buffer {
         auto it = uccl::g_proxies_by_dev.find(device_index);
         if (it == uccl::g_proxies_by_dev.end() || it->second.empty()) {
           throw std::runtime_error(
-              "uccl_ep.Buffer: no UcclProxy registered for device " +
+              "ep.Buffer: no UcclProxy registered for device " +
               std::to_string(device_index) +
-              ". Call uccl.uccl_ep.register_proxy(device_index, proxies) "
+              ". Call uccl.ep.register_proxy(device_index, proxies) "
               "first.");
         }
       }

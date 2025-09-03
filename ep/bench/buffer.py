@@ -349,3 +349,18 @@ class Buffer:
             EventOverlap(event, tensors_to_record if async_finish else None),
             hook,
         )
+
+    def get_next_low_latency_combine_buffer(self, handle: object):
+        """
+        Get the raw registered RDMA buffer tensor for next low-latency combine, so that the next combine kernel can skip the copying.
+
+        Arguments:
+            handle: the communication handle given by the `dispatch` function.
+
+        Returns:
+            buffer: the raw RDMA low-latency buffer as a BF16 PyTorch tensor with shape
+                `[num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden]`, you should fill this buffer
+                by yourself.
+        """
+        src_info, layout_range, num_max_dispatch_tokens_per_rank, hidden, num_experts = handle
+        return self.runtime.get_next_low_latency_combine_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)

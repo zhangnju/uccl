@@ -1,3 +1,17 @@
+"""
+This is the same test_low_latency.py test in DeepEP's repo.
+On first node:
+torchrun --nnodes=2 --nproc_per_node=8 --node_rank=0 \
+  --master_addr=10.141.1.1 --master_port=12355 \
+  bench/test_low_latency.py --num-processes=8 --num-tokens=128 \
+  --hidden=7168 --num-topk=8 --num-experts=288
+
+On second node:
+torchrun --nnodes=2 --nproc_per_node=8 --node_rank=1 \
+  --master_addr=10.141.1.1 --master_port=12355 \
+  bench/test_low_latency.py --num-processes=8 --num-tokens=128 \
+  --hidden=7168 --num-topk=8 --num-experts=288
+""" 
 import argparse
 import random
 import time
@@ -8,15 +22,69 @@ import numpy as np
 from functools import partial
 from typing import Optional
 
-import deep_ep
-from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back
+from buffer import Buffer
+from utils import init_dist, bench, bench_kineto, calc_diff, hash_tensor, per_token_cast_back, get_cpu_proxies_meta, get_peer_ip
 
+# UCCL import
+try:
+    from uccl import ep
+except ImportError as exc:
+    import sys
+
+    sys.stderr.write("Failed to import uccl.ep\n")
+    raise
 
 def test_main(num_tokens: int, hidden: int, num_experts: int, num_topk: int,
-              rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: deep_ep.Buffer,
+              rank: int, num_ranks: int, group: dist.ProcessGroup, buffer: Buffer,
               use_logfmt: bool = False, seed: int = 0):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
+
+    # UCCL new code for initialization
+    bench = ep.Bench()
+    proxies = []
+    scratch_nbytes = int(1e9)  # 256 MB
+    scratch = torch.empty(
+        scratch_nbytes, dtype=torch.uint8, device=f"cuda:{device_index}"
+    )
+    scratch_ptr = scratch.data_ptr()
+
+    rank2meta = get_cpu_proxies_meta(rank, scratch_ptr, scratch_nbytes, num_ranks, group)
+    peers_meta_list = [rank2meta[r] for r in range(num_ranks)]
+    device_index = int(os.environ["LOCAL_RANK"])
+    peer_ip = get_peer_ip(rank, num_ranks, group)
+
+    for i in range(bench.num_proxies()):
+        proxy = ep.Proxy(
+            rb_addr=bench.ring_addr(i),
+            block_idx=i,
+            gpu_buffer_addr=scratch_ptr,
+            total_size=scratch_nbytes,
+            rank=rank,
+            peer_ip=peer_ip,
+        )
+        proxy.set_peers_meta(peers_meta_list)
+        proxies.append(proxy)
+    ep.register_proxies(device_index, proxies)
+    
+    dist.barrier(group)
+    for i in range(bench.num_proxies()):
+        proxies[i].start_dual()
+        
+    workers = None
+    if hasattr(ep, "PeerCopyManager"):
+        try:
+            workers = ep.PeerCopyManager(src_device=device_index)
+            workers.start_for_proxies(proxies)
+            if rank == 0:
+                print("[simple-test] ✓ PeerCopyManager started", flush=True)
+        except Exception as e:
+            if rank == 0:
+                print(f"[simple-test] PeerCopyManager unavailable: {e}", flush=True)
+                
+    time.sleep(1)
+    # UCCL new code for initialization.
+
 
     assert num_experts % num_ranks == 0
     num_local_experts = num_experts // num_ranks
@@ -169,10 +237,10 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
 
-    num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(num_tokens, hidden, num_ranks, num_experts)
+    num_rdma_bytes = Buffer.get_low_latency_rdma_size_hint(num_tokens, hidden, num_ranks, num_experts)
     if local_rank == 0:
         print(f'Allocating buffer size: {num_rdma_bytes / 1e6} MB ...', flush=True)
-    buffer = deep_ep.Buffer(group, num_rdma_bytes=num_rdma_bytes, low_latency_mode=True,
+    buffer = Buffer(group, num_rdma_bytes=num_rdma_bytes, low_latency_mode=True,
                             num_qps_per_rank=num_experts // num_ranks,
                             allow_nvlink_for_low_latency_mode=not args.disable_nvlink, explicitly_destroy=True,
                             allow_mnnvl=args.allow_mnnvl)

@@ -145,6 +145,13 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
             lane_id == 0
                 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1)
                 : 0;
+
+        if (lane_id == 0 && slot_idx >= num_max_dispatch_tokens_per_rank) {
+          printf("[OOB] slot_idx=%d cap=%d expert=%d token=%d\n", slot_idx,
+                 num_max_dispatch_tokens_per_rank, dst_expert_idx, token_idx);
+          asm("trap;");  // or EP_DEVICE_ASSERT(false);
+        }
+
         slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
         auto const dst_rank = dst_expert_idx / num_local_experts;
         auto const dst_expert_local_idx = dst_expert_idx % num_local_experts;
@@ -168,6 +175,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                       ipc_base_ptrs, rank, dst_rank, max_nvl_peers, 0)
                 : nullptr;
 
+        printf("dst_p2p_ptr in dispatch=%p\n", (void*)dst_p2p_ptr);
+
         if (dst_p2p_ptr != nullptr) {
           // Intra-node: use direct memory copy via IPC
           auto const* src_int4_ptr = reinterpret_cast<int4 const*>(src_ptr);
@@ -176,6 +185,10 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                              src_int4_ptr, ld_nc_global, st_na_global);
         } else {
           // Inter-node or no IPC: use IBGDA
+          printf("Use IBGDA to send to dst_rank=%d, dst_offset=%" PRId64
+                 ", src_ptr=%p, expert_idx=%d, slot_idx=%d\n",
+                 dst_rank, dst_offset, (void*)src_ptr, dst_expert_idx,
+                 slot_idx);
           uccl::nvshmemi_ibgda_put_nbi_warp(
               dst_offset, src_ptr, num_bytes_per_msg, dst_rank,
               sm_id,  // NOTE(MaoZiming): use sm_id for rb.
@@ -254,9 +267,17 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                                           sm_id * num_warp_groups];
 
     // Wait local sends issued and send expert counts
+    printf(
+        "Before ld_acquire_global(atomic_finish_counter_per_expert=%p, "
+        "responsible_expert_idx=%d)\n",
+        atomic_finish_counter_per_expert, responsible_expert_idx);
     while (ld_acquire_global(atomic_finish_counter_per_expert +
                              responsible_expert_idx) != FINISHED_SUM_TAG * 2)
       ;
+    printf(
+        "After ld_acquire_global(atomic_finish_counter_per_expert, "
+        "responsible_expert_idx=%d)\n",
+        responsible_expert_idx);
     // TODO(yihan): Mark here for future debugging check.
     // Calculate offset within LowLatencyLayout buffer for CPU proxy translation
     // Calculate offset relative to dispatch_rdma_recv_data_buffer (rdma_recv_x)
@@ -304,7 +325,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
     atomic_finish_counter_per_expert[responsible_expert_idx] = 0;
 
     // Clean `packed_recv_count`
-    if (dst_rank == 0) packed_recv_count[dst_expert_local_idx] = 0;
+    // Note(MaoZiming): changed from DeepEP.
+    if (dst_rank == rank) packed_recv_count[dst_expert_local_idx] = 0;
   }
   __syncwarp();
 
@@ -373,6 +395,12 @@ LOW_LATENCY_DISPATCH_RECV:
           num_recv_tokens, -num_recv_tokens - 1, (void*)count_addr);
       recv_token_begin_idx =
           atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
+
+      EP_DEVICE_ASSERT(num_recv_tokens >= 0);
+      EP_DEVICE_ASSERT(num_recv_tokens <= num_max_dispatch_tokens_per_rank);
+      EP_DEVICE_ASSERT(recv_token_begin_idx >= 0);
+      EP_DEVICE_ASSERT(recv_token_begin_idx + num_recv_tokens <=
+                       num_ranks * num_max_dispatch_tokens_per_rank);
       shared_num_recv_tokens[warp_group_id] = num_recv_tokens;
       shared_recv_token_begin_idx[warp_group_id] = recv_token_begin_idx;
       recv_range[src_rank] =

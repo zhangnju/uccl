@@ -546,6 +546,27 @@ class Buffer {
     return {reinterpret_cast<char const*>(unique_id.data()), unique_id.size()};
   }
 
+  torch::Tensor get_next_low_latency_combine_buffer(
+      int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const {
+    LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank,
+                            hidden, num_ranks, num_experts);
+
+    auto buffer = layout.buffers[low_latency_buffer_idx];
+    auto dtype = torch::kBFloat16;
+    auto num_msg_elems = static_cast<int>(buffer.num_bytes_per_combine_msg /
+                                          elementSize(torch::kBFloat16));
+
+    EP_HOST_ASSERT(
+        buffer.num_bytes_per_combine_msg % elementSize(torch::kBFloat16) == 0);
+    return torch::from_blob(
+        buffer.combine_rdma_send_buffer_data_start,
+        {num_experts / num_ranks, num_ranks * num_max_dispatch_tokens_per_rank,
+         hidden},
+        {num_ranks * num_max_dispatch_tokens_per_rank * num_msg_elems,
+         num_msg_elems, 1},
+        torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
+  }
+
   void sync(std::vector<int> const& device_ids,
             std::vector<std::optional<pybind11::bytearray>> const&
                 all_gathered_handles,
@@ -816,6 +837,8 @@ PYBIND11_MODULE(ep, m) {
            py::arg("all_gathered_handles"),
            py::arg("root_unique_id_opt") = py::none())
       .def("is_available", &Buffer::is_available)
+      .def("get_next_low_latency_combine_buffer",
+           &Buffer::get_next_low_latency_combine_buffer)
       .def("low_latency_combine", &Buffer::low_latency_combine, py::arg("x"),
            py::arg("topk_idx"), py::arg("topk_weights"), py::arg("src_info"),
            py::arg("layout_range"),

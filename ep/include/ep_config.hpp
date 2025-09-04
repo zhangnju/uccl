@@ -53,7 +53,7 @@ struct LowLatencyLayout {
 
   LowLatencyLayout(void* rdma_buffer, int num_max_dispatch_tokens_per_rank,
                    int hidden, int num_ranks, int num_experts,
-                   void* atomic_buffer_ptr) {
+                   void* atomic_buffer_ptr = nullptr) {
     int const num_scales = hidden / 128;
 
     // Dispatch and combine layout:

@@ -636,8 +636,10 @@ class Buffer {
         rdma_buffer_ptr =
             internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
       } else {
-        printf("rdma_buffer_ptr is set, using existing buffer: %p\n",
-               rdma_buffer_ptr);
+        printf(
+            "rdma_buffer_ptr is set, using existing buffer: %p, "
+            "num_rdma_bytes: %ld\n",
+            rdma_buffer_ptr, num_rdma_bytes);
       }
       CUDA_CHECK(
           cudaMemsetAsync(rdma_buffer_ptr, 0, num_rdma_bytes, comm_stream));

@@ -32,6 +32,17 @@ except ImportError as exc:
     raise
 
 
+def calc_diff(x: torch.Tensor, y: torch.Tensor):
+    x, y = x.double() + 1, y.double() + 1
+    denominator = (x * x + y * y).sum()
+    sim = 2 * (x * y).sum() / denominator
+    return (1 - sim).item()
+
+
+def hash_tensor(t: torch.Tensor):
+    return t.view(torch.int64).sum().item()
+
+
 def init_dist(local_rank: int, num_local_ranks: int):
     # NOTES: you may rewrite this function with your own cluster settings
     ip = os.getenv("MASTER_ADDR", "127.0.0.1")

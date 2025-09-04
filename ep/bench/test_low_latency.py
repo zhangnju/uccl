@@ -1,16 +1,16 @@
 """
 This is the same test_low_latency.py test in DeepEP's repo.
 On first node:
-torchrun --nnodes=2 --nproc_per_node=8 --node_rank=0 \
-  --master_addr=10.141.1.1 --master_port=12355 \
-  bench/test_low_latency.py --num-processes=8 --num-tokens=128 \
-  --hidden=7168 --num-topk=8 --num-experts=288
+torchrun --nnodes=2 --nproc_per_node=1 --node_rank=0 \
+  --master_addr=10.1.209.224 --master_port=12355 \
+  bench/test_low_latency.py --num-tokens=128 \
+  --hidden=7168 --num-topk=8 --num-experts=288 --disable-nvlink
 
 On second node:
-torchrun --nnodes=2 --nproc_per_node=8 --node_rank=1 \
-  --master_addr=10.141.1.1 --master_port=12355 \
-  bench/test_low_latency.py --num-processes=8 --num-tokens=128 \
-  --hidden=7168 --num-topk=8 --num-experts=288
+torchrun --nnodes=2 --nproc_per_node=1 --node_rank=1 \
+  --master_addr=10.1.209.224 --master_port=12355 \
+  bench/test_low_latency.py --num-tokens=128 \
+  --hidden=7168 --num-topk=8 --num-experts=288 --disable-nvlink
 """
 
 import argparse
@@ -345,18 +345,17 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
-
-    # UCCL new code for initialization
-    device_index = int(os.environ["LOCAL_RANK"])
-    scratch_nbytes = int(1e9)  # 256 MB
-    scratch = torch.empty(
-        scratch_nbytes, dtype=torch.uint8, device=f"cuda:{device_index}"
-    )
-    proxies, workers = initialize_uccl(scratch, scratch_nbytes, rank, num_ranks, group)
-
     num_rdma_bytes = Buffer.get_low_latency_rdma_size_hint(
         num_tokens, hidden, num_ranks, num_experts
     )
+
+    # UCCL new code for initialization
+    device_index = int(os.environ["LOCAL_RANK"])
+    scratch = torch.empty(
+        num_rdma_bytes, dtype=torch.uint8, device=f"cuda:{device_index}"
+    )
+    proxies, workers = initialize_uccl(scratch, num_rdma_bytes, rank, num_ranks, group)
+
     if local_rank == 0:
         print(f"Allocating buffer size: {num_rdma_bytes / 1e6} MB ...", flush=True)
     buffer = Buffer(
@@ -462,6 +461,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     num_processes = args.num_processes
-    torch.multiprocessing.spawn(
-        test_loop, args=(num_processes, args), nprocs=num_processes
-    )
+    # NOTE: modified from deep_ep
+    local_rank = int(os.environ["LOCAL_RANK"])
+    num_local_ranks = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
+    test_loop(local_rank, num_local_ranks, args)

@@ -43,6 +43,9 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
   EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0,
                    "Invalid vector length");
 
+  EP_DEVICE_ASSERT(num_warps <= 32);
+  EP_DEVICE_ASSERT(gridDim.x * num_warp_groups >= num_experts);
+
   // FP8 staffs
   constexpr int kNumPerChannels = 128;
   int const num_scales = kHidden / kNumPerChannels;
@@ -256,6 +259,19 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
     }
   }
   __syncthreads();
+
+  if (responsible_expert_idx < num_experts && sub_warp_id == 0 &&
+      lane_id == 0) {
+    int v = ld_acquire_global(atomic_finish_counter_per_expert +
+                              responsible_expert_idx);
+    int s = shared_num_tokens_sent_per_expert[responsible_expert_idx -
+                                              sm_id * num_warp_groups];
+    printf("[DBG] expert=%d sum=%d pre-wait=%d (expect=%d)\n",
+           responsible_expert_idx, s, v, FINISHED_SUM_TAG * 2);
+  }
+
+  if (blockIdx.x == 0 && threadIdx.x == 0)
+    printf("[DBG] FINISHED_SUM_TAG=%d\n", FINISHED_SUM_TAG);
 
   // Issue count sends
   if (responsible_expert_idx < num_experts and sub_warp_id == 0 and

@@ -1094,7 +1094,8 @@ void remote_send_ack(ProxyCtx* ctx, struct ibv_qp* ack_qp, uint64_t& wr_id,
   };
 
 #ifdef EFA
-
+  printf("remote_send_ack: worker %d sending ACK wr_id %lu\n", worker_idx,
+         wr_id);
   auto qpx = (struct ibv_qp_ex*)ack_qp;
   ibv_wr_start(qpx);
 
@@ -1191,6 +1192,7 @@ void post_atomic_operations_efa(ProxyCtx& S,
   }
 
   for (auto& [dst_rank, wr_ids] : dst_rank_wr_ids) {
+    printf("Posting %zu atomic WRs to dst_rank=%d\n", wr_ids.size(), dst_rank);
     if (wr_ids.empty()) continue;
 
     ProxyCtx* ctx = ctxs[dst_rank].get();

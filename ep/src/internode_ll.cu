@@ -174,8 +174,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                           reinterpret_cast<char*>(rdma_recv_x) + dst_offset),
                       ipc_base_ptrs, rank, dst_rank, max_nvl_peers, 0)
                 : nullptr;
-
-        printf("dst_p2p_ptr in dispatch=%p\n", (void*)dst_p2p_ptr);
+        if (lane_id == 0)
+          printf("dst_p2p_ptr in dispatch=%p\n", (void*)dst_p2p_ptr);
 
         if (dst_p2p_ptr != nullptr) {
           // Intra-node: use direct memory copy via IPC
@@ -185,10 +185,11 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                              src_int4_ptr, ld_nc_global, st_na_global);
         } else {
           // Inter-node or no IPC: use IBGDA
-          printf("Use IBGDA to send to dst_rank=%d, dst_offset=%" PRId64
-                 ", src_ptr=%p, expert_idx=%d, slot_idx=%d\n",
-                 dst_rank, dst_offset, (void*)src_ptr, dst_expert_idx,
-                 slot_idx);
+          if (lane_id == 0)
+            printf("Use IBGDA to send to dst_rank=%d, dst_offset=%" PRId64
+                   ", src_ptr=%p, expert_idx=%d, slot_idx=%d\n",
+                   dst_rank, dst_offset, (void*)src_ptr, dst_expert_idx,
+                   slot_idx);
           uccl::nvshmemi_ibgda_put_nbi_warp(
               dst_offset, src_ptr, num_bytes_per_msg, dst_rank,
               sm_id,  // NOTE(MaoZiming): use sm_id for rb.
@@ -271,9 +272,21 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
         "Before ld_acquire_global(atomic_finish_counter_per_expert=%p, "
         "responsible_expert_idx=%d)\n",
         atomic_finish_counter_per_expert, responsible_expert_idx);
+    int spins = 0;
     while (ld_acquire_global(atomic_finish_counter_per_expert +
-                             responsible_expert_idx) != FINISHED_SUM_TAG * 2)
+                             responsible_expert_idx) != FINISHED_SUM_TAG * 2) {
       ;
+      if (lane_id == 0) {
+        if ((spins & ((1 << 20) - 1)) == 0) {
+          printf("[WAIT] expert=%d value=%d expected=%d\n",
+                 responsible_expert_idx,
+                 ld_acquire_global(atomic_finish_counter_per_expert +
+                                   responsible_expert_idx),
+                 FINISHED_SUM_TAG * 2);
+        }
+        spins++;
+      }
+    }
     printf(
         "After ld_acquire_global(atomic_finish_counter_per_expert, "
         "responsible_expert_idx=%d)\n",

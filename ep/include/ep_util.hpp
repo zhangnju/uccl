@@ -1,4 +1,5 @@
 #pragma once
+#include "exception.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAEvent.h>
 #include <string>

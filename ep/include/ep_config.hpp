@@ -1,7 +1,6 @@
 #pragma once
 #include "ep_configs.cuh"
 #include "ep_util.hpp"
-#include "internode.cuh"
 #include <cstddef>
 #include <cstdint>
 #include <utility>

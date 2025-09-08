@@ -196,6 +196,11 @@ void per_thread_rdma_init(ProxyCtx& S, void* gpu_buf, size_t bytes, int rank,
   if (S.rkey != 0) {
     fprintf(stderr, "Warning: rkey already set (%x), overwriting\n", S.rkey);
   }
+
+  if (S.mr->rkey == 0) {
+    fprintf(stderr, "rkey equals 0!\n");
+    std::abort();
+  }
   S.rkey = S.mr->rkey;
 }
 
@@ -623,7 +628,7 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
                              std::vector<uint64_t> const& wrs_to_post,
                              std::vector<TransferCmd> const& cmds_to_post,
                              std::vector<std::unique_ptr<ProxyCtx>>& ctxs,
-                             int my_rank) {
+                             int my_rank, int block_idx) {
   if (num_wrs == 0) return;
   if (wrs_to_post.size() != num_wrs || cmds_to_post.size() != num_wrs) {
     fprintf(stderr,
@@ -637,6 +642,8 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
   for (size_t i = 0; i < num_wrs; ++i) {
     if (cmds_to_post[i].dst_rank == static_cast<uint32_t>(my_rank)) {
       // NOTE(MaoZiming): this should not happen.
+      printf("Posting rdma to itself\n");
+      std::abort();
       continue;
     } else {
       dst_rank_wr_ids[cmds_to_post[i].dst_rank].push_back(i);
@@ -663,13 +670,8 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
       qpx->comp_mask = 0;
       qpx->wr_flags = (j + 1 == k) ? IBV_SEND_SIGNALED : 0;
 
-      uint64_t remote_addr;
-
-      if (cmd.is_combine)
-        remote_addr = ctx->remote_addr + (cmd.req_rptr ? cmd.req_rptr : 0);
-      else
-        remote_addr = ctx->remote_addr + S.dispatch_recv_data_offset +
-                      (cmd.req_rptr ? cmd.req_rptr : 0);
+      uint64_t remote_addr =
+          ctx->remote_addr + (cmd.req_rptr ? cmd.req_rptr : 0);
       uint64_t remote_end = ctx->remote_addr + ctx->remote_len;
 
       if (remote_addr < ctx->remote_addr ||
@@ -733,6 +735,24 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
       else
         wrs[j].wr.rdma.remote_addr =
             ctx->remote_addr + S.dispatch_recv_data_offset + cmd.req_rptr;
+
+      uint64_t remote_end = ctx->remote_addr + ctx->remote_len;
+      if (wrs[j].wr.rdma.remote_addr < ctx->remote_addr ||
+          wrs[j].wr.rdma.remote_addr + cmd.bytes > remote_end) {
+        fprintf(stderr,
+                "[ERROR] Remote write OOB: addr=0x%llx len=%zu (base=0x%llx, "
+                "size=%zu), cmd.req_rptr: 0x%llx\n",
+                (unsigned long long)wrs[j].wr.rdma.remote_addr, cmd.bytes,
+                (unsigned long long)ctx->remote_addr, (size_t)ctx->remote_len,
+                (unsigned long long)cmd.req_rptr);
+        cudaError_t err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+          fprintf(stderr, "cudaDeviceSynchronize failed: %s\n",
+                  cudaGetErrorString(err));
+          std::abort();
+        }
+        std::abort();
+      }
 
       wrs[j].wr.rdma.rkey = ctx->remote_rkey;
       wrs[j].opcode = IBV_WR_RDMA_WRITE;
@@ -1089,7 +1109,6 @@ void remote_send_ack(ProxyCtx* ctx, struct ibv_qp* ack_qp, uint64_t& wr_id,
   };
 
 #ifdef EFA
-
   auto qpx = (struct ibv_qp_ex*)ack_qp;
   ibv_wr_start(qpx);
 
@@ -1170,7 +1189,7 @@ void post_atomic_operations_efa(ProxyCtx& S,
                                 std::vector<uint64_t> const& wrs_to_post,
                                 std::vector<TransferCmd> const& cmds_to_post,
                                 std::vector<std::unique_ptr<ProxyCtx>>& ctxs,
-                                int my_rank) {
+                                int my_rank, int block_idx) {
   if (cmds_to_post.size() > ProxyCtx::kMaxAtomicOps) {
     fprintf(stderr, "Too many atomic operations: %zu > %zu\n",
             cmds_to_post.size(), ProxyCtx::kMaxAtomicOps);

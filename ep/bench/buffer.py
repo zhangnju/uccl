@@ -11,6 +11,7 @@ except ImportError as exc:
     sys.stderr.write("Failed to import uccl.ep\n")
     raise
 
+from uccl.ep import EventHandle
 from utils import EventOverlap, check_nvlink_connections
 
 
@@ -143,6 +144,13 @@ class Buffer:
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
         assert self.runtime.is_available()
 
+    def reset_rdma_buffer(self):
+        """
+        Reset the RDMA buffer, this is useful when you want to reuse the RDMA buffer for another run.
+
+        """
+        self.runtime.reset_rdma_buffer()
+
     def connect_atomic_buffer(self, proxy: "ep.UcclProxy"):
         ep.connect_atomic_buffer(proxy, self.runtime)
 
@@ -156,6 +164,16 @@ class Buffer:
 
         self.runtime.destroy()
         self.runtime = None
+
+    @staticmethod
+    def capture() -> EventOverlap:
+        """
+        Capture a CUDA event on the current stream, i.e. `torch.cuda.current_stream()`.
+
+        Returns:
+            event: the captured event.
+        """
+        return EventOverlap(EventHandle())
 
     # noinspection PyTypeChecker
     def low_latency_dispatch(
@@ -371,4 +389,27 @@ class Buffer:
         ) = handle
         return self.runtime.get_next_low_latency_combine_buffer(
             num_max_dispatch_tokens_per_rank, hidden, num_experts
+        )
+
+    @staticmethod
+    def get_low_latency_rdma_size_hint(
+        num_max_dispatch_tokens_per_rank: int,
+        hidden: int,
+        num_ranks: int,
+        num_experts: int,
+    ) -> int:
+        """
+        Get a minimum size requirement for the RDMA buffer. The size calculation will be done with BF16.
+
+        Arguments:
+            num_max_dispatch_tokens_per_rank: the maximum number of tokens to dispatch, all the ranks must hold the same value.
+            hidden: the hidden dimension of each token.
+            num_ranks: the number of EP group ranks.
+            num_experts: the number of all experts.
+
+        Returns:
+            size: the RDMA buffer size recommended.
+        """
+        return ep.get_low_latency_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts
         )

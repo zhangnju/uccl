@@ -380,7 +380,7 @@ class Buffer {
           num_max_dispatch_tokens_per_rank, num_topk, num_experts, rank,
           num_ranks, use_fp8, round_scale, use_ue8m0, workspace, num_device_sms,
           launch_stream, phases, d_ring_addrs, num_ring_addrs,
-          get_num_max_nvl_peers(), d_ipc_base_ptrs,
+          get_num_max_nvl_peers(), d_ipc_base_ptrs, rdma_buffer_ptr,
           atomic_buffer_ptr);  // Added IPC base pointers
     };
     launcher(return_recv_hook
@@ -546,6 +546,40 @@ class Buffer {
     return {reinterpret_cast<char const*>(unique_id.data()), unique_id.size()};
   }
 
+  torch::Tensor get_next_low_latency_combine_buffer(
+      int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const {
+    printf("get_next_low_latency_combine_buffer called\n");
+    LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank,
+                            hidden, num_ranks, num_experts, nullptr);
+
+    auto buffer = layout.buffers[low_latency_buffer_idx];
+    auto dtype = torch::kBFloat16;
+    auto num_msg_elems = static_cast<int>(buffer.num_bytes_per_combine_msg /
+                                          elementSize(torch::kBFloat16));
+
+    EP_HOST_ASSERT(
+        buffer.num_bytes_per_combine_msg % elementSize(torch::kBFloat16) == 0);
+    return torch::from_blob(
+        buffer.combine_rdma_send_buffer_data_start,
+        {num_experts / num_ranks, num_ranks * num_max_dispatch_tokens_per_rank,
+         hidden},
+        {num_ranks * num_max_dispatch_tokens_per_rank * num_msg_elems,
+         num_msg_elems, 1},
+        torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
+  }
+
+  void reset_rdma_buffer() {
+    CUDA_CHECK(
+        cudaMemsetAsync(rdma_buffer_ptr, 0, num_rdma_bytes, comm_stream));
+    CUDA_CHECK(cudaStreamSynchronize(comm_stream));
+    printf("RDMA buffer reset done\n");
+
+    if (atomic_buffer_ptr != nullptr) {
+      cudaMemset(atomic_buffer_ptr, 0, kAtomicBufferSize);
+      printf("Atomic buffer reset done\n");
+    }
+  }
+
   void sync(std::vector<int> const& device_ids,
             std::vector<std::optional<pybind11::bytearray>> const&
                 all_gathered_handles,
@@ -598,52 +632,22 @@ class Buffer {
     // Sync NVSHMEM handles and allocate memory
     // NOTE(MaoZiming): drop nvshmem. we directly allocate rdma_buffer_ptr.
     if (num_rdma_bytes > 0) {
-#if false
-      // Initialize NVSHMEM
-      EP_HOST_ASSERT(root_unique_id_opt.has_value());
-      std::vector<uint8_t> root_unique_id(root_unique_id_opt->size());
-      auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
-      std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(),
-                  root_unique_id_opt->size());
-      auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
-      auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
-      EP_HOST_ASSERT(nvshmem_rank ==
-                     internode::init(root_unique_id, nvshmem_rank,
-                                     num_nvshmem_ranks, low_latency_mode));
-      internode::barrier();
-
-      // Allocate RDMA buffer
-      if (!rdma_buffer_ptr) {
-        rdma_buffer_ptr =
-            internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
-      }
-
-      // Clean buffer (mainly for low-latency mode)
-      CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
-
-      // Barrier
-      internode::barrier();
-      CUDA_CHECK(cudaDeviceSynchronize());
-#else
       // TODO(MaoZiming): this needs to be allocated by proxy.
       if (!rdma_buffer_ptr) {
         fprintf(stderr,
                 "WARNING: rdma_buffer_ptr is not set, allocating %ld bytes "
                 "for RDMA buffer.\n",
                 num_rdma_bytes);
-        fflush(stderr);
         std::abort();
-        rdma_buffer_ptr =
-            internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
       } else {
-        printf("rdma_buffer_ptr is set, using existing buffer: %p\n",
-               rdma_buffer_ptr);
+        printf(
+            "rdma_buffer_ptr is set, using existing buffer: %p, "
+            "num_rdma_bytes: %ld\n",
+            rdma_buffer_ptr, num_rdma_bytes);
       }
-      CUDA_CHECK(
-          cudaMemsetAsync(rdma_buffer_ptr, 0, num_rdma_bytes, comm_stream));
-      CUDA_CHECK(cudaStreamSynchronize(comm_stream));
-#endif
+      reset_rdma_buffer();
     }
+
     // Ready to use
     available = true;
   }
@@ -795,6 +799,7 @@ PYBIND11_MODULE(ep, m) {
           },
           py::arg("addr"),
           R"doc(Set RDMA buffer from a raw address. Caller must keep the memory alive.)doc")
+      .def("reset_rdma_buffer", &Buffer::reset_rdma_buffer)
       .def("low_latency_dispatch", &Buffer::low_latency_dispatch, py::arg("x"),
            py::arg("topk_idx"),
            py::arg("cumulative_local_expert_recv_stats") = py::none(),
@@ -814,6 +819,8 @@ PYBIND11_MODULE(ep, m) {
            py::arg("all_gathered_handles"),
            py::arg("root_unique_id_opt") = py::none())
       .def("is_available", &Buffer::is_available)
+      .def("get_next_low_latency_combine_buffer",
+           &Buffer::get_next_low_latency_combine_buffer)
       .def("low_latency_combine", &Buffer::low_latency_combine, py::arg("x"),
            py::arg("topk_idx"), py::arg("topk_weights"), py::arg("src_info"),
            py::arg("layout_range"),
@@ -836,7 +843,7 @@ PYBIND11_MODULE(ep, m) {
                                std::string(cudaGetErrorString(st)));
     }
   });
-
+  m.def("get_low_latency_rdma_size_hint", &get_low_latency_rdma_size_hint);
   m.def("sync_stream", []() {
     auto st = cudaDeviceSynchronize();
     if (st != cudaSuccess)

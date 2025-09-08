@@ -355,6 +355,8 @@ def test_main(
             return_recv_hook=return_recv_hook,
         )
         large_gemm_with_hook(hook) if return_recv_hook else None
+        buffer.reset_rdma_buffer()
+        time.sleep(0.1)
 
     print("[simple-test] ✓ All correctness tests passed!", flush=True)
     # Calculate bandwidth
@@ -370,13 +372,15 @@ def test_main(
 
     # Dispatch + combine testing
     # TODO(MaoZiming)
+    # avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=True))
+    avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=True))
+    print(
+        f"[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, "
+        f"avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us",
+        flush=True,
+    )
+    
     if False:
-        avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=False))
-        print(
-            f"[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, "
-            f"avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us",
-            flush=True,
-        )
         # Separate profiling
         for return_recv_hook in (False, True):
             group.barrier()
